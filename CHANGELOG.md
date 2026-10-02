@@ -22,8 +22,19 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/rel
 - **A 4-state target with more leading zeros than the signal width never
   matched.** `--condition "bus=b00000001xxxx"` on an 8-bit bus returned "no
   interval" even though `b0001xxxx` matched. Excess high bits that are all `0`
-  are now trimmed; a `1`/`x`/`z` above the width still never matches.
-  New `verify/test_condition_signed_targets.py` covers all three.
+  are now trimmed, once when the condition is resolved; a `1`/`x`/`z` above the
+  width still never matches.
+- **A non-ASCII digit in a condition target crashed with a traceback.**
+  `str.isdigit()` admits characters such as a superscript two that `int()` then
+  rejects, so `--condition "cnt=²"` raised a raw `ValueError`; other scripts'
+  digits (`٣`) were silently read as numbers, and `float()`-only spellings such
+  as `1_000` became real targets. One shared classifier now reads bare numbers
+  for both signs, ASCII only, with real targets held to the same `_REAL_RE`
+  grammar the parser applies to dumped reals. The leading-`+` error no longer
+  claims signed targets are unsupported.
+
+New `verify/test_condition_signed_targets.py` covers all four; 210 tests pass,
+up from 181.
 
 ## [1.5.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.2) - 2026-09-24
 

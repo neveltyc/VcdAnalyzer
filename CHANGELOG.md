@@ -3,6 +3,39 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
 
+## [1.5.3](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.3) - 2026-10-02
+
+### Fixed
+
+- **`search` rejected every negative target**, including on signals that carry
+  negative values in stock simulator output. A real signal dumped by iverilog as
+  `r-1.5` showed in `snapshot` but `--condition "r_val=-1.5"` errored with
+  `negative target values are not supported`. Negative real targets now match
+  real/realtime signals numerically.
+- **Signed integers had to be searched by their unsigned encoding.** iverilog
+  dumps `integer cnt = -1` as 32 ones, and VCD records no signedness (`reg signed
+  [7:0]` is declared as plain `reg`), so finding `cnt == -1` meant hand-folding it
+  to `4294967295`. A negative decimal target on a logic signal now means its
+  two's-complement pattern in the declared width, for every logic signal;
+  a value outside the width's signed range is rejected rather than silently
+  unmatched. Real signals keep the signed value.
+- **A 4-state target with more leading zeros than the signal width never
+  matched.** `--condition "bus=b00000001xxxx"` on an 8-bit bus returned "no
+  interval" even though `b0001xxxx` matched. Excess high bits that are all `0`
+  are now trimmed, once when the condition is resolved; a `1`/`x`/`z` above the
+  width still never matches.
+- **A non-ASCII digit in a condition target crashed with a traceback.**
+  `str.isdigit()` admits characters such as a superscript two that `int()` then
+  rejects, so `--condition "cnt=²"` raised a raw `ValueError`; other scripts'
+  digits (`٣`) were silently read as numbers, and `float()`-only spellings such
+  as `1_000` became real targets. One shared classifier now reads bare numbers
+  for both signs, ASCII only, with real targets held to the same `_REAL_RE`
+  grammar the parser applies to dumped reals. The leading-`+` error no longer
+  claims signed targets are unsupported.
+
+New `verify/test_condition_signed_targets.py` covers all four; 210 tests pass,
+up from 181.
+
 ## [1.5.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.2) - 2026-09-24
 
 ### Fixed

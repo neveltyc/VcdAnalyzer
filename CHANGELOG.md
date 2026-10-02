@@ -3,6 +3,23 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
+## Unreleased
+
+### Added
+
+- **Don't-care bits in `search` targets.** A condition compares a whole value,
+  so "bit 2 of `status` is 1" -- 128 distinct values on an 8-bit bus -- could not
+  be asked; the only route was dumping the bus and decoding it outside the tool,
+  which runs into `--limit` on long traces. A `?` in a binary literal now
+  matches any bit value, as in a Verilog `casez` item: `status=b?????1??` tests
+  one bit, `state=b10??` a field. Both sides are left-extended by the VCD rule
+  first, so a short literal still pads with `0` (write every bit to leave the
+  high bits free), and a mask runs against compressed dumps such as iverilog's
+  `b1xxxx`. Under `!=`, only the cared bits must be known: an `x` under a `?`
+  no longer blocks the match. `?` needs the `b`/`0b` prefix (a bare `1??0` is
+  rejected with a hint) and applies to logic signals only. Excess `?` bits above
+  the width are trimmed like excess zeros. New `verify/test_condition_mask.py`.
+
 ## [1.5.3](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.3) - 2026-10-02
 
 ### Fixed

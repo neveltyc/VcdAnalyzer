@@ -32,6 +32,8 @@ Argument formats:
                   Condition signal patterns must match exactly one signal.
                   SIG!=VAL does not match x/z/undef; use SIG=x to search unknown.
                   Values: decimal 5, hex 0x5, binary b0101, 4-state b1x0z, real 3.14.
+                  '?' in a binary literal is a don't-care bit: status=b?????1?? tests bit 2
+                  of an 8-bit bus (a short literal pads with 0, so write every bit).
                   A negative decimal (-5) on a logic signal means its two's-complement
                   bit pattern in the declared width (cnt=-1 on 32 bits = 0xffffffff).
                   A logic signal takes bit/numeric targets, a real signal numeric ones;
@@ -1881,6 +1883,9 @@ def _parse_target_value(text):
       - 4-state binary literals with x/z keep a raw bit-string target. Explicit
         binary prefixes are stripped because VCD stores vector values as
         ``1x0`` internally, not ``b1x0``.
+      - A binary literal may mark don't-care bits with '?' (b?????1??), as in
+        a Verilog casez item. It keeps a raw mask target; '?' needs the b/0b
+        prefix, so a bare '1??0' is rejected rather than guessed at.
       - A bare number carrying a fraction or exponent (3.14, 1e-9) is a
         target_real, matched only against real/realtime signals.
 
@@ -1933,7 +1938,8 @@ def _parse_target_value(text):
             return raw, int(raw, 16), None
         except ValueError:
             raise _ValueParseError(
-                'invalid hex target {!r}; x/z literals must use binary form like b1x0z'.format(text))
+                'invalid hex target {!r}; x/z and ? literals must use binary form '
+                'like b1x0z or b1??0'.format(text))
 
     if raw.startswith('0b') or raw.startswith('b'):
         body = raw[2:] if raw.startswith('0b') else raw[1:]
@@ -1945,10 +1951,11 @@ def _parse_target_value(text):
         try:
             return body, int(body, 2), None
         except ValueError:
-            if all(c in '01xz' for c in body):
+            if all(c in '01xz?' for c in body):
                 return body, None, None
             raise _ValueParseError(
-                'invalid binary target {!r}; expected only 0/1/x/z'.format(text))
+                "invalid binary target {!r}; expected only 0/1/x/z, or ? for a "
+                "don't-care bit".format(text))
 
     # Bare target, in order: decimal integer, 4-state literal, real number.
     # Anything else is a parse error -- see the docstring on why an opaque
@@ -1964,6 +1971,9 @@ def _parse_target_value(text):
             'literal target too wide; max characters is {}'.format(MAX_SIGNAL_WIDTH))
     if _is_4state_bits(raw):
         return raw, None, None
+    if '?' in raw and all(c in '01xz?' for c in raw):
+        raise _ValueParseError(
+            "don't-care target {!r} needs a binary prefix, e.g. b{}".format(text, raw))
     raise _ValueParseError(
         'invalid target {!r}; expected a decimal (5), hex (0xff), binary (b1010), '
         '4-state literal (1x0z), or real number (3.14). Note there is no in-string '
@@ -2019,6 +2029,28 @@ def _left_extend_bits(bits, width):
     return pad * (width - len(bits)) + bits
 
 
+def _mask_cared_bits(value, mask, width):
+    """Pair a value's bits with a don't-care mask's, skipping the '?' bits.
+
+    Both sides are left-extended to the width by the VCD rule (_left_extend_bits;
+    a '?' MSB pads with '0', so b1?? on 8 bits still requires the top five bits
+    to be 0 -- write every bit, e.g. b?????1??, to leave them free). Returns
+    [(value_bit, mask_bit), ...] for the cared positions, or None when the
+    value is not a 4-state bit string or the mask is wider than the width (an
+    over-wide mask keeps a 1/x/z above the width after _fit_target_to_width's
+    trim, which no value can match).
+    """
+    if not _is_4state_bits(value):
+        return None
+    if width is None:
+        width = max(len(value), len(mask))
+    if len(mask) > width:
+        return None
+    v = _left_extend_bits(value, width)
+    m = _left_extend_bits(mask, width)
+    return [(vb, mb) for vb, mb in zip(v, m) if mb != '?']
+
+
 def _real_target_number(target_int, target_real):
     """Numeric value of a target for real/realtime comparison, or None.
 
@@ -2064,6 +2096,8 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
       beyond the width are trimmed once at resolve time, by
       _fit_target_to_width). Non-bit-string literals fall
       back to exact string equality.
+    - A don't-care mask (b?????1??) compares only its non-'?' bits, after the
+      same left-extension (_mask_cared_bits).
     """
     if kind == 'event':
         return False
@@ -2082,6 +2116,9 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
     if target_int is not None:
         iv = val_to_int(value)
         return iv is not None and iv == target_int
+    if '?' in target_raw:
+        cared = _mask_cared_bits(value, target_raw, width)
+        return cared is not None and all(v == t for v, t in cared)
     if width is not None and _is_4state_bits(value) and _is_4state_bits(target_raw):
         if len(target_raw) > width:
             return False
@@ -2118,13 +2155,21 @@ def _condition_match(value, op, target_raw, target_int, width=None, kind=None,
     Inequality is deliberately stricter than `not _value_matches(...)`:
     x/z/undef do NOT satisfy `!=`. In RTL debug, unknown is not evidence that
     a signal is definitely different from a value. Users who want unknowns
-    should ask for them explicitly, e.g. `valid=x`.
+    should ask for them explicitly, e.g. `valid=x`. Against a don't-care mask
+    only the cared bits count: an x under a '?' does not block `!=`.
     """
     if value is None:
         return False
     if op in ('=', '=='):
         return _value_matches(value, target_raw, target_int, width, kind, target_real)
     if op == '!=':
+        if '?' in target_raw and kind != 'real':
+            # A don't-care bit's value is not evidence either way, so only the
+            # bits the mask cares about can make `!=` unknown.
+            cared = _mask_cared_bits(value, target_raw, width)
+            if cared is None or any(v in 'xz' for v, _t in cared):
+                return False
+            return any(v != t for v, t in cared)
         if _has_unknown(value, kind):
             return False
         return not _value_matches(value, target_raw, target_int, width, kind, target_real)
@@ -2311,8 +2356,9 @@ def _fit_target_to_width(c):
     keep the signed value and compare numerically.
 
     Over-wide 4-state literal -> leading zeros trimmed. Excess high bits that
-    are all '0' carry no value (b00000001xxxx on an 8-bit bus is 0001xxxx); a
-    1/x/z above the width is left in place, and _value_matches never matches it.
+    are all '0' or '?' carry no value (b00000001xxxx on an 8-bit bus is
+    0001xxxx; a don't-care bit above the width constrains nothing); a 1/x/z
+    above the width is left in place, and _value_matches never matches it.
     """
     if c['kind_of_signal'] == 'real':
         return
@@ -2321,7 +2367,7 @@ def _fit_target_to_width(c):
     if target_int is None:
         raw = c['target_raw']
         excess = len(raw) - width
-        if c['target_real'] is None and excess > 0 and not raw[:excess].strip('0'):
+        if c['target_real'] is None and excess > 0 and not raw[:excess].strip('0?'):
             c['target_raw'] = raw[excess:]
         return
     if target_int >= 0:

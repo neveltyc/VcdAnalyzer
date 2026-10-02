@@ -111,6 +111,17 @@ def test_not_equal_blocked_by_x_in_a_cared_bit(vcd):
     assert spans(search(vcd, 'bus!=b????1???')) == [(0, 20), (50, 60)]
 
 
+def test_not_equal_over_wide_mask_agrees_with_plain_literal(vcd):
+    # A set bit above the width makes the mask unequal to every value, so `!=`
+    # holds wherever the cared in-width bits are known -- exactly what a plain
+    # over-wide literal answers. (The bit-3 x at 40ns blocks only the mask with
+    # bit 3 cared.)
+    assert spans(search(vcd, 'bus!=b1????????')) == [(0, 60)]
+    assert spans(search(vcd, 'bus!=b1????1???')) == [(0, 40), (50, 60)]
+    assert va._condition_match('1010', '!=', '1????????', None, width=8)
+    assert va._condition_match('1010', '!=', '100001010', None, width=8)
+
+
 def test_condition_match_helper_directly():
     assert va._condition_match('1xxxx', '!=', '???0????', None, width=8)
     assert not va._condition_match('1xxxx', '!=', '????0???', None, width=8)

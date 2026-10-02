@@ -100,6 +100,7 @@ import math
 import json
 import argparse
 from collections import defaultdict
+from functools import lru_cache
 
 # -- Time utilities ----------------------------------------------------------
 
@@ -192,6 +193,7 @@ _REAL_NONFINITE_RE = re.compile(
 # replaces per-character all()/any() generator scans on the hot value-change
 # path, where they accounted for tens of millions of Python-level iterations.
 _DEL_4STATE_LOWER = {ord(c): None for c in '01xz'}     # canonical lowercase
+_DEL_MASK_LOWER = {ord(c): None for c in '01xz?'}      # 4-state + don't-care
 _DEL_4STATE_CI = {ord(c): None for c in '01xXzZ'}      # raw VCD, case-insensitive
 
 # Extended VCD port state character → 4-state mapping (IEEE 1364-2005 18.4.3.1).
@@ -1951,7 +1953,7 @@ def _parse_target_value(text):
         try:
             return body, int(body, 2), None
         except ValueError:
-            if all(c in '01xz?' for c in body):
+            if _is_mask_bits(body):
                 return body, None, None
             raise _ValueParseError(
                 "invalid binary target {!r}; expected only 0/1/x/z, or ? for a "
@@ -1971,7 +1973,7 @@ def _parse_target_value(text):
             'literal target too wide; max characters is {}'.format(MAX_SIGNAL_WIDTH))
     if _is_4state_bits(raw):
         return raw, None, None
-    if '?' in raw and all(c in '01xz?' for c in raw):
+    if _is_mask_bits(raw):
         raise _ValueParseError(
             "don't-care target {!r} needs a binary prefix, e.g. b{}".format(text, raw))
     raise _ValueParseError(
@@ -2013,6 +2015,11 @@ def _is_4state_bits(text):
     return bool(text) and not text.translate(_DEL_4STATE_LOWER)
 
 
+def _is_mask_bits(text):
+    """True for a 4-state bit string that may also hold '?' don't-care bits."""
+    return bool(text) and not text.translate(_DEL_MASK_LOWER)
+
+
 def _left_extend_bits(bits, width):
     """Apply VCD vector left-extension to a 4-state bit string.
 
@@ -2029,26 +2036,39 @@ def _left_extend_bits(bits, width):
     return pad * (width - len(bits)) + bits
 
 
-def _mask_cared_bits(value, mask, width):
-    """Pair a value's bits with a don't-care mask's, skipping the '?' bits.
+@lru_cache(maxsize=256)
+def _mask_plan(mask, width):
+    """Cared bits of a mask laid out over `width`: ((lsb_offset, bit), ...).
 
-    Both sides are left-extended to the width by the VCD rule (_left_extend_bits;
-    a '?' MSB pads with '0', so b1?? on 8 bits still requires the top five bits
-    to be 0 -- write every bit, e.g. b?????1??, to leave them free). Returns
-    [(value_bit, mask_bit), ...] for the cared positions, or None when the
-    value is not a 4-state bit string or the mask is wider than the width (an
-    over-wide mask keeps a 1/x/z above the width after _fit_target_to_width's
-    trim, which no value can match).
+    The mask is left-extended to the width by the VCD rule first (a '?' or 0/1
+    MSB pads with '0', an x/z MSB with itself), so b1?? on 8 bits still requires
+    the top five bits to be 0 -- write every bit, e.g. b?????1??, to leave them
+    free. Bits a mask places above the width stay in the plan; the value has no
+    such bit, which reads as 0 (_mask_cared_bits). A condition's mask and width
+    are fixed once resolved, so the layout is cached rather than rebuilt on
+    every evaluation.
+    """
+    m = _left_extend_bits(mask, width)
+    return tuple((off, b) for off, b in enumerate(reversed(m)) if b != '?')
+
+
+def _mask_cared_bits(value, mask, width):
+    """Pair a value's bits with a mask's cared (non-'?') bits.
+
+    A plain 4-state literal is a mask with no '?', so every logic bit-pattern
+    comparison -- equality and the `!=` unknown rule -- goes through here.
+    Returns [(value_bit, mask_bit), ...], or None when the value is not a
+    4-state bit string. A value bit above its declared width does not exist and
+    reads as 0, so an over-wide mask with a 1/x/z there (left in place by
+    _fit_target_to_width) can never be equal, and `!=` holds once the cared
+    bits are known -- the same answer the excess-bit rule always gave.
     """
     if not _is_4state_bits(value):
         return None
-    if width is None:
-        width = max(len(value), len(mask))
-    if len(mask) > width:
-        return None
     v = _left_extend_bits(value, width)
-    m = _left_extend_bits(mask, width)
-    return [(vb, mb) for vb, mb in zip(v, m) if mb != '?']
+    n = len(v)
+    return [(v[n - 1 - off] if off < n else '0', b)
+            for off, b in _mask_plan(mask, width)]
 
 
 def _real_target_number(target_int, target_real):
@@ -2096,8 +2116,9 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
       beyond the width are trimmed once at resolve time, by
       _fit_target_to_width). Non-bit-string literals fall
       back to exact string equality.
-    - A don't-care mask (b?????1??) compares only its non-'?' bits, after the
-      same left-extension (_mask_cared_bits).
+    - A don't-care mask (b?????1??) compares only its non-'?' bits; a plain
+      4-state literal is the same comparison with every bit cared
+      (_mask_cared_bits).
     """
     if kind == 'event':
         return False
@@ -2116,13 +2137,9 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
     if target_int is not None:
         iv = val_to_int(value)
         return iv is not None and iv == target_int
-    if '?' in target_raw:
+    if width is not None and _is_mask_bits(target_raw):
         cared = _mask_cared_bits(value, target_raw, width)
         return cared is not None and all(v == t for v, t in cared)
-    if width is not None and _is_4state_bits(value) and _is_4state_bits(target_raw):
-        if len(target_raw) > width:
-            return False
-        return _left_extend_bits(value, width) == _left_extend_bits(target_raw, width)
     return value == target_raw
 
 
@@ -2163,9 +2180,11 @@ def _condition_match(value, op, target_raw, target_int, width=None, kind=None,
     if op in ('=', '=='):
         return _value_matches(value, target_raw, target_int, width, kind, target_real)
     if op == '!=':
-        if '?' in target_raw and kind != 'real':
-            # A don't-care bit's value is not evidence either way, so only the
-            # bits the mask cares about can make `!=` unknown.
+        if (kind != 'real' and width is not None and target_int is None
+                and target_real is None and _is_mask_bits(target_raw)):
+            # Bit-pattern target (a plain 4-state literal is a mask with no
+            # '?'): a don't-care bit's value is not evidence either way, so
+            # only the cared bits can make `!=` unknown.
             cared = _mask_cared_bits(value, target_raw, width)
             if cared is None or any(v in 'xz' for v, _t in cared):
                 return False

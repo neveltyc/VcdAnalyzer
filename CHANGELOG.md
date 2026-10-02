@@ -1,9 +1,9 @@
 # Changelog
 
 All notable changes to vcd_analyzer. Detailed per-release
-notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
+notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
-## [1.5.3](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.3) - 2026-10-02
+## [1.5.3](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.3) - 2026-10-02
 
 ### Fixed
 
@@ -36,7 +36,7 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/rel
 New `verify/test_condition_signed_targets.py` covers all four; 210 tests pass,
 up from 181.
 
-## [1.5.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.2) - 2026-09-24
+## [1.5.2](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.2) - 2026-09-24
 
 ### Fixed
 
@@ -76,7 +76,7 @@ up from 181.
   docstring now names the `(rows, undefined, counts)` it returns. Test counts
   and version markers bumped for this release.
 
-## [1.5.1](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.1) - 2026-09-08
+## [1.5.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.1) - 2026-09-08
 
 ### Fixed
 
@@ -113,7 +113,7 @@ up from 181.
   forced to UTF-8 (`errors='replace'`) so a legacy Windows codepage cannot
   turn a valid dump into `UnicodeEncodeError`.
 
-## [1.5.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.0) - 2026-08-24
+## [1.5.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.0) - 2026-08-24
 
 `search`'s condition system, rebuilt around the shape the downstream [RWaveAnalyzer](https://github.com/neveltyc/RWaveAnalyzer) port converged on: the edge trigger moves out of a flag and into the condition grammar, and OR becomes a repeatable flag. Along the way three silent-wrong-answer bugs found while comparing the two implementations are fixed — a real signal's value read as a bit string, a mis-typed in-string boolean accepted as an opaque literal, and a repeated `--condition` quietly discarding all but the last. Every non-`search` command is byte-identical to 1.4.0 at equal `--limit` (verified with `verify/bench.py --baseline`); the full suite passes, now 162 tests including three new files.
 
@@ -134,7 +134,7 @@ up from 181.
 - New `_transition_groups`, the per-timestamp grouping of 1.4.0's `iter_transitions` view (as `_event_groups` is of `iter_events`). Carrying `prev` and `kind` per record is what lets event mode compute a tick's transition set — and so answer "did `a` and `b` change together?" — without re-deriving either. `_term_key` is shared by the within-clause term de-dup and the cross-clause clause de-dup so the two cannot drift apart.
 - New `verify/test_search_or.py`, `verify/test_search_changed_term.py`, and `verify/test_condition_kinds.py` (55 cases), ported from the downstream `search_or_conditions.rs` / `search_changed_condition.rs` suites plus this tool's own finer per-record contract, the intra-timestamp record-order-independence lock, and the real/event kind cases.
 
-## [1.4.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.4.0) - 2026-08-24
+## [1.4.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.4.0) - 2026-08-24
 
 Internal refactor separating the event stream from derived state into one change-semantics core with three distinct views. No change to any command's output — proven byte-identical to 1.3.20 by `verify/bench.py --baseline` across every command and by a 674-case per-command differential over the checked-in fixtures and external samples; the full suite (now including `verify/test_layering.py`) passes.
 
@@ -145,7 +145,7 @@ Before this, `VCDParser.iter_events` was the only data-plane API, and it simulta
 - **Consumers use the right view.** snapshot/compare → `state_at`/`state_pair`; summary → `iter_transitions` (using the stream's `prev`, dropping its own `prev` field; the width-based scalar test is kept so 1-bit event/real signals still report rise/fall `0`, not `null`); `search --changed` → `iter_transitions` with per-event evaluation, so the hand-rolled per-timestamp regrouping and the duplicate `type == 'event'` check are gone; interval/segment `search` → the previously-dead `_event_groups` helper, the legitimate settled-state-per-timestamp view. `cmd_dump` remains the raw-event consumer via `iter_events`.
 - **Cleanup.** Removed dead code (`_build_snapshot`/`_build_snapshot_before`/`_build_snapshot_pair`, `_data_tokens`), revived `_event_groups`, and corrected a stale `_bit_map` shape comment. New `verify/test_layering.py` locks the three views, the precomputed kind, and their equivalence (`iter_events` == `iter_transitions` minus prev/kind; `state_at` == fold of `iter_events`).
 
-## [1.3.20](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.20) - 2026-08-24
+## [1.3.20](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.20) - 2026-08-24
 
 Three correctness fixes found by review, plus documentation and validation cleanup. Every fix is locked with a regression test in the existing harnesses (`test_parser_direct_coverage.py`, `test_commands_direct_coverage.py`, `test_summary_begin_boundary.py`, `test_parser_optimizations.py`); the full suite passes.
 
@@ -158,7 +158,7 @@ Three correctness fixes found by review, plus documentation and validation clean
 - **Time-window boundary contract documented.** With no `--end`, the effective end is the file's last timestamp (a `--begin` past it is an error); with an explicit `--end` beyond the last timestamp, the last known state is extended into the window — the same last-known-value persistence as `snapshot`/`compare`. Recorded in the module docstring and README (en/zh).
 - **Docs: `int_max_str_digits` is not PEP 678.** Five comments (four in `vcd_analyzer.py`, one in this file) attributed Python 3.11's decimal `int(str)` digit limit to PEP 678; PEP 678 is the unrelated exception `add_note()` proposal. The limit is the 3.11 GH-95770 hardening and needs no PEP citation.
 
-## [1.3.19](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.19) - 2026-07-19
+## [1.3.19](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.19) - 2026-07-19
 
 Correctness pass on free-format VCD (IEEE 1364-2005 permits several declarations or timestamps per physical line, and value_change identifiers that clash with structural tokens). Every fix below was reproduced with a minimal fixture and locked with a regression test in `verify/test_freeformat.py`; the previously-green suite still passes.
 
@@ -172,170 +172,170 @@ Correctness pass on free-format VCD (IEEE 1364-2005 permits several declarations
 
 Minor: `list` prints `Matched: n/total` in consistent alias-path units (no more `2/1`); `search --begin` past the last event without `--end` says so instead of "end time must be >= begin time"; `--limit` validation raises a dedicated `_LimitParseError` (wired into `main()`); dropped a redundant local `import os` and the uppercase-`P` value-change opener the parser never emits.
 
-## [1.3.18](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.18) - 2026-07-18
+## [1.3.18](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.18) - 2026-07-18
 
 Fix `info`'s `time_max` collapsing to `time_min` on VCD files whose lines are indented. `scan_time_range` scans `t_max` backward from EOF with a regex that anchored `#<digits>` timestamps to the start of a line (`(?:^|\n)#(\d+)`). VCD is a free-format token stream where leading whitespace before a token — including a timestamp — is legal, so any dump that indents its body (e.g. the checked-in GordonMcGregor sample, indented 4 spaces per line) matched nothing, and the silent `t_max = t_min` fallback masked the miss as a plausible-looking `500ns ~ 500ns` instead of the correct `500ns ~ 2.01us`. The `t_min` forward scan already tolerated this because it uses `line.split()`; the two scanners had drifted apart. The regex now allows leading horizontal whitespace (`(?:\A|\n)[ \t]*#(\d+)`), which still ignores a mid-line `#5` value-change identifier because `[ \t]*` only skips to the line's first token. Additionally, when the backward scan reads the entire data section without a hit it now degrades to a full forward scan for the last `#T` token rather than silently returning `t_max = t_min`. Regression coverage added: `test_scan_time_range_tolerates_indented_timestamps` and a `time_max_ticks == 2010` assertion on the GordonMcGregor sample in `test_external_samples.py`.
 
-## [1.3.17](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.17) - 2026-05-29
+## [1.3.17](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.17) - 2026-05-29
 
 Add a common-shape fast path to the `$var` declaration parser, adopted from the same downstream optimization pass that contributed 1.3.15. `_parse_var_tokens` previously ran two `_collect_bracket_tokens` scans for every variable; on files that declare hundreds of thousands of signals (VCS/Verdi headers, large UVM testbenches) that is a measurable per-command startup cost. The two dominant token layouts emitted by VCS, Verilator, and Icarus — `vtype width sym name` and `vtype width sym name [range]`, with an integer width — are now handled directly, skipping both bracket scans. Bracketed or split-range sizes and any other shape fall through to the existing general parser, so output is byte-for-byte identical (verified against the prior revision across all fixtures, the one-line header fast path, and a 512 MB FST-to-VCD trace carrying 275 K `$var` records, including wide-bus bit-selects and nested scopes). The one-line header fast path from 1.3.15 feeds this same helper, so both header paths benefit. Modest on its own and only touches the header phase; the dominant full-scan cost remains the per-line tokenization inherent to the text format.
 
-## [1.3.16](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.16) - 2026-05-29
+## [1.3.16](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.16) - 2026-05-29
 
 Inline the over-wide value clamp on the value-change hot path. `iter_events` previously called `_clamp_overwide_logic_value()` for every standalone value change; on large dumps ~93% of those values are single-character scalars that can never exceed their declared width, so the call was almost pure function/dict/len overhead across tens of millions of events. The guard is now inlined — scalars and in-width values are stored directly, and the helper is invoked only for the rare genuinely over-wide value, where it remains the single source of truth. Output is byte-for-byte identical (verified against the prior revision across all fixtures, external samples, and a 512 MB VCS trace, including the malformed over-wide case). Modest on its own; the dominant full-scan cost remains the per-line tokenization inherent to the text format.
 
-## [1.3.15](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.15) - 2026-05-29
+## [1.3.15](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.15) - 2026-05-29
 
 Two parser optimizations adopted from a contributed optimization pass, with output verified byte-for-byte identical to 1.3.14. First, the data-section tokenizer reads in large chunks and splits in C with a carry buffer for tokens that span chunk boundaries, instead of iterating line by line; FST-to-VCD converters emit tens of millions of one-token lines, and this removes the per-line Python overhead on them. Second, the header parser gains a fast path for the common one-declaration-per-line form (`$var wire 1 ! clk $end`), falling back to the tolerant token parser for free-form or multi-line declarations; both paths share a single `_parse_var_tokens` helper so the parsed signal table is identical. Roughly 1.1-1.25x on summary/dump/snapshot/compare over a 43 MB Icarus trace and an FST2VCD-style trace, with larger gains on filtered queries. A contributed regex-based selected-signal scanner was evaluated and rejected: it dropped value-change events on dense traces (an off-by-one in non-overlapping regex matching) and was slower than the general iterator on filtered queries, so it was not adopted. New regression tests cover chunk-boundary tokenization and header fast-path equivalence.
 
-## [1.3.14](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.14) - 2026-05-29
+## [1.3.14](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.14) - 2026-05-29
 
 Stream `dump` text output instead of materializing every event into a dict and printing line by line: lines are formatted on the fly and flushed in batches, cutting a full `dump --limit 0` over a 40 MB trace to roughly a third of its former wall-clock time with byte-identical output. JSON output is unchanged. Add `verify/bench.py`, a self-contained benchmark and equivalence harness that generates a deterministic synthetic VCD, times each command with output sent to `/dev/null` (so a command is measured rather than the harness's pipe-draining cost), and with `--baseline` compares two copies while verifying their stdout is byte-for-byte identical.
 
-## [1.3.13](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.13) - 2026-05-29
+## [1.3.13](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.13) - 2026-05-29
 
 Speed up the value-change hot path for large VCDs (roughly 2x on summary, snapshot, and compare over a 43 MB trace) with no change in output. Replace per-character `all()`/`any()` 4-state validation with C-level `str.translate`, flatten the data-section tokenizer to walk per-line token lists by index instead of resuming a per-token generator, inline the common 1-bit scalar value-change, and defer the over-wide 4-state scan in `fmt_val`/`_clamp_overwide_logic_value` behind a cheap width guard. `cmd_dump` now memoizes the formatted timestamp across events that share it.
 
-## [1.3.12](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.12) - 2026-05-28
+## [1.3.12](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.12) - 2026-05-28
 
 Replace double-scan paths with single-pass iter_events in summary, compare, and search. Refine summary_rows baseline phase to avoid redundant stats-dict creation, using a lightweight baseline dict with lazy stats dispatch.
 
-## [1.3.11](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.11) - 2026-05-28
+## [1.3.11](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.11) - 2026-05-28
 
 Dramatically speed up filtered iteration and time-range scanning for large VCDs
 
-## [1.3.10](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.10) - 2026-05-27
+## [1.3.10](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.10) - 2026-05-27
 
 Fix `summary` begin-boundary transition counting
 
-## [1.3.9](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.9) - 2026-05-25
+## [1.3.9](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.9) - 2026-05-25
 
 Eliminate duplicated value-change parsing in data scanning paths
 
-## [1.3.8](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.8) - 2026-05-25
+## [1.3.8](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.8) - 2026-05-25
 
 Harden input validation and error reporting
 
-## [1.3.7](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.7) - 2026-05-25
+## [1.3.7](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.7) - 2026-05-25
 
 Fix literal bus-range globs and escaped-scope reporting
 
-## [1.3.6](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.6) - 2026-05-25
+## [1.3.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.6) - 2026-05-25
 
 Clamp malformed over-wide logic values
 
-## [1.3.5](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.5) - 2026-05-25
+## [1.3.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.5) - 2026-05-25
 
 Remove obsolete search helper
 
-## [1.3.4](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.4) - 2026-05-25
+## [1.3.4](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.4) - 2026-05-25
 
 Support width-aware 4-state matching
 
-## [1.3.3](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.3) - 2026-05-25
+## [1.3.3](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.3) - 2026-05-25
 
 Refine changed-mode and truncation behavior
 
-## [1.3.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.2) - 2026-05-25
+## [1.3.2](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.2) - 2026-05-25
 
 Preserve begin-boundary edges in changed mode
 
-## [1.3.1](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.1) - 2026-05-24
+## [1.3.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.1) - 2026-05-24
 
 Add truncation accounting for streaming commands
 
-## [1.3.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.3.0) - 2026-05-24
+## [1.3.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.3.0) - 2026-05-24
 
 Redesign search around conditions and observations
 
-## [1.2.12](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.12) - 2026-05-24
+## [1.2.12](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.12) - 2026-05-24
 
 Capture richer header metadata
 
-## [1.2.11](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.11) - 2026-05-24
+## [1.2.11](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.11) - 2026-05-24
 
 Improve malformed token recovery
 
-## [1.2.10](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.10) - 2026-05-24
+## [1.2.10](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.10) - 2026-05-24
 
 Continue parser hardening
 
-## [1.2.9](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.9) - 2026-05-24
+## [1.2.9](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.9) - 2026-05-24
 
 Cap integer parsing in headers
 
-## [1.2.8](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.8) - 2026-05-24
+## [1.2.8](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.8) - 2026-05-24
 
 Validate timestamp tokens defensively
 
-## [1.2.7](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.7) - 2026-05-24
+## [1.2.7](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.7) - 2026-05-24
 
 Refine safety bounds and filtering
 
-## [1.2.6](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.6) - 2026-05-24
+## [1.2.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.6) - 2026-05-24
 
 Tighten regex and malformed-input handling
 
-## [1.2.5](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.5) - 2026-05-24
+## [1.2.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.5) - 2026-05-24
 
 Add environment-controlled parser limits
 
-## [1.2.4](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.4) - 2026-05-24
+## [1.2.4](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.4) - 2026-05-24
 
 Harden time parsing and CLI guards
 
-## [1.2.3](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.3) - 2026-05-24
+## [1.2.3](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.3) - 2026-05-24
 
 Refine summary and search payloads
 
-## [1.2.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.2) - 2026-05-25
+## [1.2.2](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.2) - 2026-05-25
 
 Expand time metadata fields
 
-## [1.2.1](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.1) - 2026-05-24
+## [1.2.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.1) - 2026-05-24
 
 Polish CLI output plumbing
 
-## [1.2.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.2.0) - 2026-05-24
+## [1.2.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.2.0) - 2026-05-24
 
 Remove edges command and add shared output helpers
 
-## [1.1.8](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.8) - 2026-05-24
+## [1.1.8](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.8) - 2026-05-24
 
 Switch legacy search to interval reporting
 
-## [1.1.7](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.7) - 2026-05-24
+## [1.1.7](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.7) - 2026-05-24
 
 Improve malformed-input recovery
 
-## [1.1.6](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.6) - 2026-05-24
+## [1.1.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.6) - 2026-05-24
 
 Protect parsing from structural-token confusion
 
-## [1.1.5](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.5) - 2026-05-24
+## [1.1.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.5) - 2026-05-24
 
 Simplify token scanning paths
 
-## [1.1.4](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.4) - 2026-05-24
+## [1.1.4](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.4) - 2026-05-24
 
 Polish search and output consistency
 
-## [1.1.3](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.3) - 2026-05-24
+## [1.1.3](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.3) - 2026-05-24
 
 Improve reassembly and reporting stability
 
-## [1.1.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.2) - 2026-05-24
+## [1.1.2](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.2) - 2026-05-24
 
 Refine parser behavior
 
-## [1.1.1](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.1) - 2026-05-24
+## [1.1.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.1) - 2026-05-24
 
 Harden multiline token cleanup
 
-## [1.1.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.1.0) - 2026-05-24
+## [1.1.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.1.0) - 2026-05-24
 
 Rewrite parser around token-based handling, remove handshake command
 
-## [1.0.0](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.0.0) - 2026-05-24
+## [1.0.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.0.0) - 2026-05-24
 
 Initial public release — core CLI, parser, and 6 subcommands

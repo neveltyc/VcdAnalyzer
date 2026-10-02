@@ -62,10 +62,10 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 
 ```bash
 # 最新版
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.3/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.3/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -164,7 +164,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 ## 版本历史
 
-详细变更见 [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) 页面。快速概览见 [CHANGELOG.md](CHANGELOG.md)。
+详细变更见 [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) 页面。快速概览见 [CHANGELOG.md](CHANGELOG.md)。
 
 | 版本 | 亮点 |
 |:------|:-----|

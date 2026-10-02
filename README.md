@@ -64,10 +64,10 @@ Single file, no dependencies, Python 3.9+.
 
 ```bash
 # Latest
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/main/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VCD_ANALYZER/v1.5.3/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.3/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -176,7 +176,7 @@ patterns, condition syntax, error recovery, and environment variable tuning.
 
 ## Version history
 
-Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page. See [CHANGELOG.md](CHANGELOG.md) for a quick overview.
+Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page. See [CHANGELOG.md](CHANGELOG.md) for a quick overview.
 
 | Version | Highlight |
 |:--------|:----------|

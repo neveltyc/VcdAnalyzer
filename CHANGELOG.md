@@ -3,7 +3,7 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
-## Unreleased
+## [1.5.4](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.4) - 2026-10-02
 
 ### Added
 

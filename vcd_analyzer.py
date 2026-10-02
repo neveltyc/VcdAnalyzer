@@ -2114,11 +2114,12 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
       comparison. This preserves exact x/z semantics while avoiding the need
       to write every leading zero for wide buses (redundant leading zeros
       beyond the width are trimmed once at resolve time, by
-      _fit_target_to_width). Non-bit-string literals fall
-      back to exact string equality.
+      _fit_target_to_width).
     - A don't-care mask (b?????1??) compares only its non-'?' bits; a plain
       4-state literal is the same comparison with every bit cared
       (_mask_cared_bits).
+    - Without a known width, or for a target that is not a bit string, the
+      comparison falls back to exact string equality.
     """
     if kind == 'event':
         return False
@@ -2377,7 +2378,8 @@ def _fit_target_to_width(c):
     Over-wide 4-state literal -> leading zeros trimmed. Excess high bits that
     are all '0' or '?' carry no value (b00000001xxxx on an 8-bit bus is
     0001xxxx; a don't-care bit above the width constrains nothing); a 1/x/z
-    above the width is left in place, and _value_matches never matches it.
+    above the width is left in place: no value equals it, and `!=` holds once
+    the cared bits are known (_mask_cared_bits).
     """
     if c['kind_of_signal'] == 'real':
         return

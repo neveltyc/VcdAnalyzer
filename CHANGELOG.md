@@ -18,7 +18,11 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
   `b1xxxx`. Under `!=`, only the cared bits must be known: an `x` under a `?`
   no longer blocks the match. `?` needs the `b`/`0b` prefix (a bare `1??0` is
   rejected with a hint) and applies to logic signals only. Excess `?` bits above
-  the width are trimmed like excess zeros. New `verify/test_condition_mask.py`.
+  the width are trimmed like excess zeros. A plain 4-state literal is now the
+  same comparison with every bit cared, so masks and literals share one
+  equality and one `!=` rule; through the CLI's resolve path its results are
+  unchanged from 1.5.3 (350k randomized value/target/width cases, 0 diffs).
+  New `verify/test_condition_mask.py`; 230 tests pass, up from 210.
 
 ## [1.5.3](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.3) - 2026-10-02
 

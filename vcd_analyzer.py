@@ -1910,21 +1910,14 @@ def _parse_target_value(text):
     if raw.startswith('-'):
         # A negative decimal integer keeps its sign in target_int; it is mapped
         # to the signal's two's-complement bit pattern at resolve time, once
-        # the width is known (see _resolve_negative_target). A negative number
+        # the width is known (see _fit_target_to_width). A negative number
         # with a fraction or exponent is a real target, like its positive form.
-        body = raw[1:]
-        if body.isdigit():
-            if len(body) > MAX_DECIMAL_VALUE_DIGITS:
-                raise _ValueParseError(
-                    'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
-            return raw, -int(body), None
-        if body and body[0] in '0123456789.' and len(body) <= MAX_DECIMAL_VALUE_DIGITS + 32:
-            try:
-                fval = float(raw)
-            except ValueError:
-                fval = None
-            if fval is not None and math.isfinite(fval):
-                return raw, None, fval
+        num = _parse_bare_number(raw[1:])
+        if num is not None:
+            target_int, target_real = num
+            if target_int is not None:
+                return raw, -target_int, None
+            return raw, None, -target_real
         raise _ValueParseError(
             'invalid negative target {!r}; only negative decimal integers (-5) '
             'and real numbers (-1.5) are supported'.format(text))
@@ -1962,31 +1955,48 @@ def _parse_target_value(text):
     # literal fallback is worse than saying so.
     if raw.startswith('+'):
         raise _ValueParseError(
-            'signed target values are not supported; write unsigned values')
-    if raw.isdigit():
-        if len(raw) > MAX_DECIMAL_VALUE_DIGITS:
-            raise _ValueParseError(
-                'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
-        return raw, int(raw), None
+            "a leading '+' is not supported; write the value without it")
+    num = _parse_bare_number(raw)
+    if num is not None:
+        return (raw,) + num
     if len(raw) > MAX_SIGNAL_WIDTH:
         raise _ValueParseError(
             'literal target too wide; max characters is {}'.format(MAX_SIGNAL_WIDTH))
     if _is_4state_bits(raw):
         return raw, None, None
-    # A number carrying a fraction or an exponent targets a real/realtime
-    # signal. nan/inf are rejected: a VCD real may legally be dumped as either,
-    # but neither is a useful equality target (nan never compares equal).
-    if len(raw) <= MAX_DECIMAL_VALUE_DIGITS + 32:
-        try:
-            fval = float(raw)
-        except ValueError:
-            fval = None
-        if fval is not None and math.isfinite(fval):
-            return raw, None, fval
     raise _ValueParseError(
         'invalid target {!r}; expected a decimal (5), hex (0xff), binary (b1010), '
         '4-state literal (1x0z), or real number (3.14). Note there is no in-string '
         'boolean syntax: repeat --condition to OR clauses'.format(text))
+
+
+def _parse_bare_number(text):
+    """Classify an unsigned bare number as (target_int, None) or (None, target_real).
+
+    Returns None when text is not a number. Only ASCII is accepted:
+    str.isdigit() also admits a superscript two, which int() then rejects
+    (a raw traceback), and both float() and _REAL_RE's \\d admit other
+    scripts' digits; float() also admits '1_000'. None of these is a spelling
+    a VCD value could carry. A real target must match _REAL_RE, the grammar
+    the parser applies to dumped real values, and be finite: a VCD real may
+    legally be dumped as nan/inf, but neither is a useful equality target
+    (nan never compares equal). The caller handles any sign.
+    """
+    if not text.isascii():
+        return None
+    if text.isdigit():
+        if len(text) > MAX_DECIMAL_VALUE_DIGITS:
+            raise _ValueParseError(
+                'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
+        return int(text), None
+    # A number carrying a fraction or an exponent targets a real/realtime
+    # signal. The sign is the caller's: '--1' must not parse as +1.
+    if (text[:1] not in ('+', '-') and len(text) <= MAX_DECIMAL_VALUE_DIGITS + 32
+            and _REAL_RE.match(text)):
+        fval = float(text)
+        if math.isfinite(fval):
+            return None, fval
+    return None
 
 
 def _is_4state_bits(text):
@@ -2050,8 +2060,9 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
       patterns. If the signal width is known, both the dumped value and the
       target are left-extended to that width using VCD rules before
       comparison. This preserves exact x/z semantics while avoiding the need
-      to write every leading zero for wide buses; conversely, redundant
-      leading zeros beyond the width are trimmed. Non-bit-string literals fall
+      to write every leading zero for wide buses (redundant leading zeros
+      beyond the width are trimmed once at resolve time, by
+      _fit_target_to_width). Non-bit-string literals fall
       back to exact string equality.
     """
     if kind == 'event':
@@ -2073,13 +2084,7 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
         return iv is not None and iv == target_int
     if width is not None and _is_4state_bits(value) and _is_4state_bits(target_raw):
         if len(target_raw) > width:
-            # Excess high bits that are all '0' carry no value (b00001x on a
-            # 4-bit bus is 001x); any 1/x/z above the declared width can
-            # never match.
-            excess = len(target_raw) - width
-            if target_raw[:excess].strip('0'):
-                return False
-            target_raw = target_raw[excess:]
+            return False
         return _left_extend_bits(value, width) == _left_extend_bits(target_raw, width)
     return value == target_raw
 
@@ -2290,10 +2295,13 @@ def _check_term_kind(c):
                 c['original'], c['path'], c['width'], c['value_text']))
 
 
-def _resolve_negative_target(c):
-    """Map a negative integer target on a logic signal to two's complement.
+def _fit_target_to_width(c):
+    """Fit a logic-signal level target to the signal's declared width, once.
 
-    VCD dumps a signed reg/integer as its raw bit pattern (iverilog writes
+    Runs at resolve time, the first point the width is known, so the matcher
+    sees an already-fitted target on every evaluation.
+
+    Negative integer -> two's complement. VCD dumps a signed reg/integer as its raw bit pattern (iverilog writes
     integer -1 as 32 ones) and does not record signedness at all -- a
     `reg signed [7:0]` is declared as plain `reg`. So a negative target is
     read as the declared-width two's-complement pattern on ANY logic signal,
@@ -2301,11 +2309,23 @@ def _resolve_negative_target(c):
     `cnt=4294967295`. A value outside the signed range of the width cannot be
     represented and is rejected rather than silently unmatched. Real signals
     keep the signed value and compare numerically.
+
+    Over-wide 4-state literal -> leading zeros trimmed. Excess high bits that
+    are all '0' carry no value (b00000001xxxx on an 8-bit bus is 0001xxxx); a
+    1/x/z above the width is left in place, and _value_matches never matches it.
     """
-    target_int = c['target_int']
-    if target_int is None or target_int >= 0 or c['kind_of_signal'] == 'real':
+    if c['kind_of_signal'] == 'real':
         return
     width = c['width']
+    target_int = c['target_int']
+    if target_int is None:
+        raw = c['target_raw']
+        excess = len(raw) - width
+        if c['target_real'] is None and excess > 0 and not raw[:excess].strip('0'):
+            c['target_raw'] = raw[excess:]
+        return
+    if target_int >= 0:
+        return
     if target_int < -(1 << (width - 1)):
         raise _ConditionParseError(
             'condition {!r}: {} does not fit signal {} (width {}) as a two\'s-'
@@ -2331,7 +2351,7 @@ def _resolve_conditions(vcd, text):
         c['kind_of_signal'] = vcd._sid_kind[sid]
         if c['kind'] == 'level':
             _check_term_kind(c)
-            _resolve_negative_target(c)
+            _fit_target_to_width(c)
         key = _term_key(c)
         if key in seen:
             continue

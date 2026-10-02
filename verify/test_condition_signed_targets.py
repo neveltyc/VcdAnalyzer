@@ -115,6 +115,33 @@ def test_nonzero_bits_above_width_never_match(vcd):
         assert spans(search(vcd, 'bus=' + target)) == []
 
 
-def test_value_matches_trims_only_zero_excess():
-    assert va._value_matches('1xxxx', '00000001xxxx', None, width=8)
-    assert not va._value_matches('1xxxx', '10000001xxxx', None, width=8)
+def test_over_wide_target_is_fitted_once_at_resolve_time(vcd):
+    # The trim happens in _fit_target_to_width, so the matcher sees the
+    # fitted literal; nonzero excess is left for the matcher to reject.
+    v = va.VCDParser(str(vcd))
+    (fitted,) = va._resolve_conditions(v, 'bus=b00000001xxxx')
+    assert fitted['target_raw'] == '0001xxxx'
+    (kept,) = va._resolve_conditions(v, 'bus=b10000001xxxx')
+    assert kept['target_raw'] == '10000001xxxx'
+
+
+# --- numeric spelling: ASCII digits and the VCD real grammar only -----------
+
+@pytest.mark.parametrize('target', [
+    '\u00b2', '-\u00b2',        # isdigit() but int() rejects: was a raw traceback
+    '\u0661', '-\u0661',        # Arabic-Indic digit: was accepted as 1 / -1
+    '1_000', '-1_0', '-1_5.0',  # float() underscores: not a VCD real spelling
+    '--1', '-+1', '-', '-0x1', '-b1', '-inf', '-nan',
+])
+def test_non_vcd_numeric_spellings_are_rejected(target):
+    with pytest.raises(va._ValueParseError):
+        va._parse_target_value(target)
+
+
+def test_non_ascii_digit_condition_is_a_clean_cli_error(tmp_path):
+    from conftest import run_cli
+    p = write_vcd(tmp_path, minimal_vcd(DECLS, DATA))
+    r = run_cli(['search', str(p), '--condition', 'cnt=-\u00b2'])
+    assert r.returncode != 0
+    assert 'Traceback' not in r.stderr
+    assert r.stderr.startswith('Error:')

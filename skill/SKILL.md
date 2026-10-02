@@ -14,8 +14,8 @@ All commands support `--json` for structured output. **Always use `--json` when 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.3/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.5.3
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.4/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.5.4
 ```
 
 No pip install, no virtualenv, no dependencies. Python 3.9+.
@@ -182,6 +182,7 @@ One `--condition` is a comma-separated **AND** clause. Each term is `SIGNAL=VALU
 - Signal pattern must match **exactly one** signal (use `list` first to find the right path).
 - Values: decimal (`5`, `255`), hex (`0xff`), binary (`b1010`, `0b1010`), 4-state (`b1x0z`), the literal `x`/`z`, or a real number (`3.14`, `1e-9`).
 - **Negative values:** a real signal takes a negative real (`dac=-1.5`). On a logic signal a negative decimal (`cnt=-1`, `sbyte=-5`) means its **two's-complement bit pattern in the declared width** — VCD records no signedness, so this applies to `integer` and `reg signed` alike (both dump as raw bits). A value outside the width's signed range is rejected. Displayed values stay unsigned (`-1` on 32 bits shows as `4294967295`).
+- **Don't-care bits:** `?` in a binary literal matches any bit value, as in a Verilog `casez` item — `status=b?????1??` holds wherever bit 2 of an 8-bit `status` is 1, and `state=b10??` on a 4-bit `state` tests its top two bits. A short literal still pads with `0` (so `b1??` on 8 bits requires the top five bits to be 0): check the width with `list` and write every bit. `?` needs the `b`/`0b` prefix and works only on logic signals. Under `!=`, an `x`/`z` sitting under a `?` does not block a match; only the cared bits must be known.
 - A 4-state target may carry extra leading zeros beyond the signal width (`b00000001xxxx` on an 8-bit bus); any `1`/`x`/`z` above the width never matches.
 - Matching follows the signal's **declared type**: a logic signal takes bit/numeric targets; a real/realtime signal is compared numerically (never as a bit string); an **event variable has no level** — `ev=1` is refused with a pointer to `changed(ev)`.
 - `!=` does **not** match `x`/`z`/undefined. Unknown is not evidence of difference. To find unknowns, use `signal=x`.

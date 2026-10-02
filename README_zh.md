@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.3-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.4-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-210%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-230%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -65,7 +65,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.3/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.4/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -134,7 +134,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ```
 vcd_analyzer.py       核心工具（单文件，仅依赖标准库）
-verify/               pytest + unittest 测试套件 —— 210 个用例，0 失败
+verify/               pytest + unittest 测试套件 —— 230 个用例，0 失败
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
 CHANGELOG.md          简洁变更日志，含详细发行说明链接
@@ -168,6 +168,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.5.4` | `search` 目标值支持不关心位:二进制字面量中的 `?` 匹配任意位值,同 Verilog `casez`(`status=b?????1??` 检查 8 位总线的第 2 位),无需 dump 整条总线即可按单个位或位段搜索 |
 | `1.5.3` | `search` 支持负数目标值:负实数可匹配 real 信号(`dac=-1.5`),逻辑信号上的负十进制数按声明位宽的二进制补码匹配(`cnt=-1`、`sbyte=-5`;VCD 不记录有无符号);4 态目标值可带多余前导零;非 ASCII 数字目标值改为正常报错而非抛出 traceback |
 | `1.5.2` | 修复 `dump --begin` 凭空报出跳变:从文件中间开始的追赶扫描现在会把 no-op 基线带到窗口边界,因此 `$dumpall`/`$dumpon` 检查点重播当前值(iverilog 默认就会输出)不再被计为变化,与全量扫描一致 |
 | `1.5.1` | 解析器保留非有限实数值(`inf`/`-inf`/`nan`,含 C99 `nan(payload)` 形式如 `nan(ind)`,此前整条记录被静默丢弃);`summary` 的单信号 unique 集合加上限(`VCD_ANALYZER_MAX_UNIQUE_VALUES`,默认 65536,超限时以 `unique_is_exact: false` 标注下界);Ctrl-C 以 130 干净退出而非打印堆栈;stdout/stderr 强制 UTF-8 |

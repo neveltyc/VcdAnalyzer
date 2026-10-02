@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.5.3-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.5.4-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-210%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-230%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -67,7 +67,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.3/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.4/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -145,7 +145,7 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 
 ```
 vcd_analyzer.py       The tool (single file, stdlib only)
-verify/               pytest + unittest suite — 210 tests, 0 failures
+verify/               pytest + unittest suite — 230 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 CHANGELOG.md          Compact changelog with links to detailed release notes
@@ -180,6 +180,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.5.4` | `search` targets accept don't-care bits: `?` in a binary literal matches any bit value, as in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus), so single bits and fields of a bus can be searched without dumping the whole bus |
 | `1.5.3` | `search` accepts negative targets: a negative real matches real signals (`dac=-1.5`), and a negative decimal on a logic signal means its two's-complement pattern in the declared width (`cnt=-1`, `sbyte=-5`; VCD records no signedness); 4-state targets may carry extra leading zeros; a non-ASCII digit target is a clean error instead of a traceback |
 | `1.5.2` | `dump --begin` no longer invents value changes: the mid-file catch-up scan carries the no-op baseline across the window edge, so a `$dumpall`/`$dumpon` checkpoint re-asserting current values — iverilog emits one by default — stays a no-op exactly as in a full scan |
 | `1.5.1` | Parser keeps non-finite real values (`inf`/`-inf`/`nan`, including C99 `nan(payload)` forms like `nan(ind)` — previously the whole record was silently dropped); `summary` caps its per-signal unique-value set (`VCD_ANALYZER_MAX_UNIQUE_VALUES`, default 65536, lower bound flagged as `unique_is_exact: false`); Ctrl-C exits 130 instead of a traceback; stdout/stderr forced to UTF-8 |

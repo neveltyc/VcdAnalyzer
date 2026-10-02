@@ -32,6 +32,8 @@ Argument formats:
                   Condition signal patterns must match exactly one signal.
                   SIG!=VAL does not match x/z/undef; use SIG=x to search unknown.
                   Values: decimal 5, hex 0x5, binary b0101, 4-state b1x0z, real 3.14.
+                  A negative decimal (-5) on a logic signal means its two's-complement
+                  bit pattern in the declared width (cnt=-1 on 32 bits = 0xffffffff).
                   A logic signal takes bit/numeric targets, a real signal numeric ones;
                   an event variable has no level -- ask changed(SIG) instead.
                   REPEAT the flag to OR the clauses (OR-of-ANDs): the search holds
@@ -1882,8 +1884,11 @@ def _parse_target_value(text):
       - A bare number carrying a fraction or exponent (3.14, 1e-9) is a
         target_real, matched only against real/realtime signals.
 
-    Invalid hex and negative decimal targets are rejected rather than silently
-    producing no matches; VCD value_change text is unsigned, and x/z literals
+    A negative decimal integer (-1) keeps its sign in target_int: VCD vector
+    text is an unsigned bit string, so the target is mapped to two's
+    complement at resolve time, once the signal width is known. A negative
+    number with a fraction or exponent (-1.5) is a target_real. Invalid hex
+    is rejected rather than silently producing no matches, and x/z literals
     should be written in binary form (e.g. b1x0z).
 
     A bare target that is none of the above is REJECTED rather than kept as an
@@ -1903,8 +1908,26 @@ def _parse_target_value(text):
             'target value too long; max length is {}'.format(MAX_VALUE_ARG_LEN))
 
     if raw.startswith('-'):
+        # A negative decimal integer keeps its sign in target_int; it is mapped
+        # to the signal's two's-complement bit pattern at resolve time, once
+        # the width is known (see _resolve_negative_target). A negative number
+        # with a fraction or exponent is a real target, like its positive form.
+        body = raw[1:]
+        if body.isdigit():
+            if len(body) > MAX_DECIMAL_VALUE_DIGITS:
+                raise _ValueParseError(
+                    'decimal target too long; max digits is {}'.format(MAX_DECIMAL_VALUE_DIGITS))
+            return raw, -int(body), None
+        if body and body[0] in '0123456789.' and len(body) <= MAX_DECIMAL_VALUE_DIGITS + 32:
+            try:
+                fval = float(raw)
+            except ValueError:
+                fval = None
+            if fval is not None and math.isfinite(fval):
+                return raw, None, fval
         raise _ValueParseError(
-            'negative target values are not supported for VCD signal matching')
+            'invalid negative target {!r}; only negative decimal integers (-5) '
+            'and real numbers (-1.5) are supported'.format(text))
 
     if raw.startswith('0x'):
         body = raw[2:]
@@ -2027,7 +2050,8 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
       patterns. If the signal width is known, both the dumped value and the
       target are left-extended to that width using VCD rules before
       comparison. This preserves exact x/z semantics while avoiding the need
-      to write every leading zero for wide buses. Non-bit-string literals fall
+      to write every leading zero for wide buses; conversely, redundant
+      leading zeros beyond the width are trimmed. Non-bit-string literals fall
       back to exact string equality.
     """
     if kind == 'event':
@@ -2049,7 +2073,13 @@ def _value_matches(value, target_raw, target_int, width=None, kind=None,
         return iv is not None and iv == target_int
     if width is not None and _is_4state_bits(value) and _is_4state_bits(target_raw):
         if len(target_raw) > width:
-            return False
+            # Excess high bits that are all '0' carry no value (b00001x on a
+            # 4-bit bus is 001x); any 1/x/z above the declared width can
+            # never match.
+            excess = len(target_raw) - width
+            if target_raw[:excess].strip('0'):
+                return False
+            target_raw = target_raw[excess:]
         return _left_extend_bits(value, width) == _left_extend_bits(target_raw, width)
     return value == target_raw
 
@@ -2260,6 +2290,31 @@ def _check_term_kind(c):
                 c['original'], c['path'], c['width'], c['value_text']))
 
 
+def _resolve_negative_target(c):
+    """Map a negative integer target on a logic signal to two's complement.
+
+    VCD dumps a signed reg/integer as its raw bit pattern (iverilog writes
+    integer -1 as 32 ones) and does not record signedness at all -- a
+    `reg signed [7:0]` is declared as plain `reg`. So a negative target is
+    read as the declared-width two's-complement pattern on ANY logic signal,
+    which is unambiguous given the width: `cnt=-1` on a 32-bit integer is
+    `cnt=4294967295`. A value outside the signed range of the width cannot be
+    represented and is rejected rather than silently unmatched. Real signals
+    keep the signed value and compare numerically.
+    """
+    target_int = c['target_int']
+    if target_int is None or target_int >= 0 or c['kind_of_signal'] == 'real':
+        return
+    width = c['width']
+    if target_int < -(1 << (width - 1)):
+        raise _ConditionParseError(
+            'condition {!r}: {} does not fit signal {} (width {}) as a two\'s-'
+            'complement value; the signed range is {}..{}'.format(
+                c['original'], c['value_text'], c['path'], width,
+                -(1 << (width - 1)), (1 << (width - 1)) - 1))
+    c['target_int'] = target_int + (1 << width)
+
+
 def _resolve_conditions(vcd, text):
     """Parse and resolve one AND clause's signal patterns to signal ids."""
     resolved = []
@@ -2276,6 +2331,7 @@ def _resolve_conditions(vcd, text):
         c['kind_of_signal'] = vcd._sid_kind[sid]
         if c['kind'] == 'level':
             _check_term_kind(c)
+            _resolve_negative_target(c)
         key = _term_key(c)
         if key in seen:
             continue

@@ -3,6 +3,28 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VCD_ANALYZER/releases) page.
 
+## Unreleased
+
+### Fixed
+
+- **`search` rejected every negative target**, including on signals that carry
+  negative values in stock simulator output. A real signal dumped by iverilog as
+  `r-1.5` showed in `snapshot` but `--condition "r_val=-1.5"` errored with
+  `negative target values are not supported`. Negative real targets now match
+  real/realtime signals numerically.
+- **Signed integers had to be searched by their unsigned encoding.** iverilog
+  dumps `integer cnt = -1` as 32 ones, and VCD records no signedness (`reg signed
+  [7:0]` is declared as plain `reg`), so finding `cnt == -1` meant hand-folding it
+  to `4294967295`. A negative decimal target on a logic signal now means its
+  two's-complement pattern in the declared width, for every logic signal;
+  a value outside the width's signed range is rejected rather than silently
+  unmatched. Real signals keep the signed value.
+- **A 4-state target with more leading zeros than the signal width never
+  matched.** `--condition "bus=b00000001xxxx"` on an 8-bit bus returned "no
+  interval" even though `b0001xxxx` matched. Excess high bits that are all `0`
+  are now trimmed; a `1`/`x`/`z` above the width still never matches.
+  New `verify/test_condition_signed_targets.py` covers all three.
+
 ## [1.5.2](https://github.com/neveltyc/VCD_ANALYZER/releases/tag/v1.5.2) - 2026-09-24
 
 ### Fixed

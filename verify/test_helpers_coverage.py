@@ -38,8 +38,13 @@ def test_value_parse_and_match_modes():
     assert va._parse_target_value('1E-3') == ('1e-3', None, 0.001)
     with pytest.raises(va._ValueParseError):
         va._parse_target_value('0xfx')
-    with pytest.raises(va._ValueParseError):
-        va._parse_target_value('-1')
+    # Negative decimal keeps its sign (two's complement is applied at resolve
+    # time, once the width is known); a negative fraction is a real target.
+    assert va._parse_target_value('-1') == ('-1', -1, None)
+    assert va._parse_target_value('-1.5') == ('-1.5', None, -1.5)
+    for bad in ('-', '-0x1', '-b1', '-inf', '-nan', '--1'):
+        with pytest.raises(va._ValueParseError):
+            va._parse_target_value(bad)
     with pytest.raises(va._ValueParseError):
         va._parse_target_value('')
     # An opaque literal is rejected rather than kept as a never-equal target:

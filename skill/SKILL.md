@@ -181,6 +181,8 @@ One `--condition` is a comma-separated **AND** clause. Each term is `SIGNAL=VALU
 
 - Signal pattern must match **exactly one** signal (use `list` first to find the right path).
 - Values: decimal (`5`, `255`), hex (`0xff`), binary (`b1010`, `0b1010`), 4-state (`b1x0z`), the literal `x`/`z`, or a real number (`3.14`, `1e-9`).
+- **Negative values:** a real signal takes a negative real (`dac=-1.5`). On a logic signal a negative decimal (`cnt=-1`, `sbyte=-5`) means its **two's-complement bit pattern in the declared width** — VCD records no signedness, so this applies to `integer` and `reg signed` alike (both dump as raw bits). A value outside the width's signed range is rejected. Displayed values stay unsigned (`-1` on 32 bits shows as `4294967295`).
+- A 4-state target may carry extra leading zeros beyond the signal width (`b00000001xxxx` on an 8-bit bus); any `1`/`x`/`z` above the width never matches.
 - Matching follows the signal's **declared type**: a logic signal takes bit/numeric targets; a real/realtime signal is compared numerically (never as a bit string); an **event variable has no level** — `ev=1` is refused with a pointer to `changed(ev)`.
 - `!=` does **not** match `x`/`z`/undefined. Unknown is not evidence of difference. To find unknowns, use `signal=x`.
 - **OR: repeat the flag.** `--condition A --condition B` holds wherever *either* clause holds (OR-of-ANDs) — one clause per channel to find when any handshakes. Duplicate clauses (identical, term-order permuted, or alias-equivalent) fold silently. Cost scales with the distinct signals referenced, not the clause count.

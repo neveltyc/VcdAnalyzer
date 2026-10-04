@@ -1870,11 +1870,6 @@ def _fmt_maybe(value, info):
     return fmt_val(value, info) if value is not None else '(undef)'
 
 
-def _time_pair(prefix, t, ts):
-    """Return both integer ticks and human-readable time for JSON outputs."""
-    return {prefix + '_ticks': t, prefix + '_h': fmt_time(t, ts) if t is not None else None}
-
-
 def _parse_target_value(text):
     """Parse search/condition target once with bounded cost.
 
@@ -2869,12 +2864,12 @@ def cmd_list(vcd, args):
                **_trunc_hint(trunc, len(shown), len(entries), True, 'signals'),
                'signals': shown})
     else:
-        # Numerator and denominator are both alias-path counts: 'entries' holds
-        # one row per alias of each matched signal, so the total must likewise
-        # count aliases across all signals (not unique signals) — otherwise a
-        # single signal with two aliases prints a nonsensical "Matched: 2/1".
-        total_aliases = sum(len(info['aliases']) for info in vcd.signals.values())
-        print('Matched: {}/{}'.format(len(entries), total_aliases))
+        # Numerator and denominator are both counts of matched alias paths:
+        # 'entries' holds one row per alias of each MATCHED signal, so a signal
+        # with two aliases reads "Matched: 2/2", not "2/1" — and a --filter
+        # denominator counts only the filtered aliases, not every alias in the
+        # file. Matching the JSON branch's total, which is len(entries) too.
+        print('Matched: {}/{}'.format(len(entries), len(entries)))
         for e in shown:
             print('  {:<60} {:>5}  {}'.format(e['path'], e['width'], e['type']))
         if trunc:

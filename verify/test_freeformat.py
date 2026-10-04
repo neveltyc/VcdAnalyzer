@@ -170,6 +170,22 @@ def test_minor_list_matched_denominator_counts_aliases(tmp_path):
     assert 'Matched: 2/2' in out
 
 
+def test_minor_list_matched_denominator_respects_filter(tmp_path):
+    # With --filter, the denominator counts only the matched aliases, not every
+    # alias in the file: one of two single-alias signals -> "Matched: 1/1",
+    # matching the JSON branch's total.
+    text = (
+        '$timescale 1ns $end\n$scope module tb $end\n'
+        '$var wire 1 ! clk $end\n$var wire 1 " rst_n $end\n'
+        '$upscope $end\n$enddefinitions $end\n#0\n0!\n'
+    )
+    p = write_vcd(tmp_path, text)
+    out = run_cli(['list', '--filter', 'clk', str(p)]).stdout
+    assert 'Matched: 1/1' in out
+    obj = json.loads(run_cli(['--json', 'list', '--filter', 'clk', str(p)]).stdout)
+    assert obj['total'] == 1
+
+
 def test_minor_begin_beyond_eof_message(tmp_path):
     p = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! a $end\n', '#0\n0!\n#10\n1!\n'))
     r = run_cli(['search', '--begin', '999999', '--condition', 'a=1', str(p)])

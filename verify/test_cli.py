@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 import unittest
@@ -13,7 +14,13 @@ FIX_HANDSHAKE = ROOT / "verify" / "fixtures" / "handshake_trace.vcd"
 FIX_BUS_RANGE = ROOT / "verify" / "fixtures" / "bus_range_trace.vcd"
 FIX_ESCAPED = ROOT / "verify" / "fixtures" / "escaped_trace.vcd"
 
-VERSION = "1.5.4"
+def _script_version():
+    """Read __version__ from the tool, so a release bump never edits this test."""
+    m = re.search(r"^__version__ = '([^']+)'", SCRIPT.read_text(), re.M)
+    assert m, "no __version__ in {}".format(SCRIPT)
+    return m.group(1)
+
+
 LEGACY_SEARCH = False
 SUPPORTS_EDGES = False
 SUPPORTS_HANDSHAKE = False
@@ -65,7 +72,7 @@ def expect_ok(*args):
 class TestCLI(unittest.TestCase):
     def test_version_banner(self):
         result = expect_ok("--version")
-        self.assertIn(VERSION, result.stdout)
+        self.assertIn(_script_version(), result.stdout)
 
     def test_info_and_list(self):
         info = run_json("--json", "info", FIX_BASIC)

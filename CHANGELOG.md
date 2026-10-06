@@ -3,6 +3,24 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
+## [1.5.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.5) - 2026-10-04
+
+### Fixed
+
+- **`list --filter` printed a denominator that counted filtered-out signals.**
+  The text-mode `Matched: N/M` denominator counted every alias in the file
+  instead of the matched ones, so `list --filter clk` on a file that also
+  declares `clk_alias` said `2/3` where only 2 aliases matched. The JSON branch
+  was already correct (`total` = matched count); the text now counts matched
+  alias paths on both sides, so the denominator respects the filter and the two
+  modes agree. New `test_minor_list_matched_denominator_respects_filter`.
+
+### Changed
+
+- Removed `_time_pair` (no callers) and the duplicate `'total'` key in
+  `cmd_dump`'s JSON literal — overwritten by `_total_json_fields`, which is now
+  the single source. No output change; 231 tests pass, up from 230.
+
 ## [1.5.4](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.4) - 2026-10-02
 
 ### Added

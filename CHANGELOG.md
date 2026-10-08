@@ -17,9 +17,8 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 
 ### Changed
 
-- Removed `_time_pair` (no callers) and the duplicate `'total'` key in
-  `cmd_dump`'s JSON literal — overwritten by `_total_json_fields`, which is now
-  the single source. No output change; 231 tests pass, up from 230.
+- Removed `_time_pair` (no callers). No output change from this cleanup;
+  231 tests pass, up from 230.
 
 ## [1.5.4](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.4) - 2026-10-02
 

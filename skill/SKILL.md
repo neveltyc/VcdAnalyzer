@@ -7,7 +7,7 @@ description: VCD waveform analysis for RTL debug. Use when the user has a .vcd f
 
 ## What this tool does
 
-`vcd_analyzer.py` is a single-file, zero-dependency Python CLI that parses IEEE 1364 VCD files and exposes seven query commands. It reads VCD files in streaming mode (constant memory regardless of file size), handles QuestaSim bit-exploded buses, Extended VCD port states, and malformed/hostile inputs safely.
+`vcd_analyzer.py` is a single-file, zero-dependency Python CLI that parses IEEE 1364 VCD files and exposes seven query commands. It streams value changes, handles QuestaSim bit-exploded buses and Extended VCD port states, and applies resource limits to malformed/hostile inputs.
 
 All commands support `--json` for structured output. **Always use `--json` when calling from an agent.**
 
@@ -58,7 +58,7 @@ User wants to know...
 Bare integer = raw VCD ticks. With unit suffix = converted using the file's `$timescale`.
 
 Valid: `0`, `100ns`, `17.5us`, `1ms`, `500ps`, `200fs`, `.5ns`
-Invalid: `10.5` (ambiguous — use `10.5ns`), `5 ns` (no space allowed)
+Invalid: `10.5` (ambiguous — use `10.5ns`), `5 ns` (no space allowed), `1_0`, `١٢` (ASCII digits only)
 
 ### Filter pattern format (`--filter`)
 
@@ -254,6 +254,7 @@ For exceptionally large VCD files, tune resource limits:
 |---|---|---|
 | `VCD_ANALYZER_MAX_VARS` | 1,000,000 | Max `$var` declarations |
 | `VCD_ANALYZER_MAX_REASSEMBLE_BITS` | 65,536 | Max bits per bit-exploded bus |
+| `VCD_ANALYZER_MAX_DATA_TOKEN_LEN` | 1,048,576 | Max characters per header or data token |
 
 Increase if the tool reports `too many $var declarations` or `bit-exploded group has more than N bits`.
 
@@ -273,6 +274,8 @@ python3 vcd_analyzer.py info sim.vcd --json
 ### Output truncation
 
 Default `--limit` is 500 results. If `truncated: true` appears in JSON output, there are more results, and a `hint` field spells out what to do about it. Use `--limit 0` for unlimited, or increase the limit. The `total_is_exact` field tells you whether `total` is the true count or a lower bound (streaming commands stop counting after the first unshown result). In text mode a clipped result ends with a `>> TRUNCATED: ...` line.
+
+Unlimited `dump` JSON and `search` output spool result rows to temporary files; sufficient temporary disk space is required.
 
 ### Time fields in JSON
 

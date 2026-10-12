@@ -3,22 +3,24 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
-## [1.5.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.5) - 2026-10-04
+## [1.5.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.5) - 2026-10-12
 
 ### Fixed
 
-- **`list --filter` printed a denominator that counted filtered-out signals.**
-  The text-mode `Matched: N/M` denominator counted every alias in the file
-  instead of the matched ones, so `list --filter clk` on a file that also
-  declares `clk_alias` said `2/3` where only 2 aliases matched. The JSON branch
-  was already correct (`total` = matched count); the text now counts matched
-  alias paths on both sides, so the denominator respects the filter and the two
-  modes agree. New `test_minor_list_matched_denominator_respects_filter`.
+- `list --filter` counts only matched aliases in its text denominator, matching JSON.
+- `search` rejects waveforms with no declared value changes, including timestamp-only files and queries with `--end`.
+- Coincident and single-edge OR clauses retain independent edges without counting overlapping matches twice.
+- The empty-waveform check no longer assembles unrelated wide buses.
+- Time arguments reject underscores and non-ASCII digits; explicit empty filters report an error.
+- Glob matching avoids exponential backtracking; header and data tokens have a configurable length cap.
+- File-system errors produce CLI diagnostics; search-window wording and a time-format example are corrected.
 
 ### Changed
 
-- Removed `_time_pair` (no callers). No output change from this cleanup;
-  231 tests pass, up from 230.
+- Unlimited `dump` JSON and `search` output spool results to temporary files instead of retaining every row in memory. Output formats and limits are unchanged.
+- Removed unused `_time_pair`. `summary` first-observation counting is unchanged.
+
+Validation: 231 tests pass; pyflakes reports no warnings.
 
 ## [1.5.4](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.4) - 2026-10-02
 

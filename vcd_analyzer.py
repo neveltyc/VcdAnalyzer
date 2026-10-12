@@ -773,11 +773,6 @@ def _parse_var_tokens(body, scope_path):
 _SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars',
                  '$dumpports', '$dumpportsoff', '$dumpportson', '$dumpportsall'}
 
-# Sections that can appear in the data area whose body is NOT value_changes
-# and must be skipped wholesale until $end. $comment (18.2.3.1) is in both
-# header and data; $vcdclose (18.3.6.1) wraps a final simulation time token.
-_DATA_SKIP_SECTIONS = {'$comment', '$vcdclose'}
-
 # ASCII whitespace byte values — the exact set bytes.split() (no separator)
 # breaks on. Used by the t_max tail scan to find token boundaries when
 # stitching a token split across a fixed-size read.
@@ -1849,8 +1844,7 @@ class VCDParser:
         (Replaces a reverse tail walk that reconstructed VCD grammar backwards
         from an arbitrary offset — a recurring source of correctness bugs. The
         forward scanner is provably equal to the event stream; see
-        ``_scan_timestamps``. ``_DATA_SKIP_SECTIONS`` stays documentation-only:
-        the "any ``$X`` that is not ``$end``/``$dump*``" drain rule matches
+        ``_scan_timestamps``. The "any ``$X`` that is not ``$end``/``$dump*``" drain rule matches
         iter_events() exactly.)
         """
         # -- t_min: forward scan from the data-section start, stop at first #T --

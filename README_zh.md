@@ -121,7 +121,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   （`dac=3.14`、`dac=100`），绝不按位串——否则它的 `%g` 文本会被读成二进制，
   使 `dac=4` 匹配上一个值为 100.0 的 real。event 变量没有电平，
   `ev=1` 会被拒绝并指向 `changed(ev)`。
-- **时间窗口。** 不给 `--end` 时，有效终点是文件最后一个时间戳，
+- **搜索时间窗口。** 不给 `--end` 时，有效终点是文件最后一个时间戳，
   超出的 `--begin` 会报错。显式 `--end` 超过最后时间戳时，最后已知状态
   会延续到该窗口（与 `snapshot`/`compare` 的 last-known-value 语义一致）。
 

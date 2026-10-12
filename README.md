@@ -131,7 +131,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   string — its `%g` text would otherwise read as binary, making `dac=4` match
   a real 100.0. An event variable has no level, so `ev=1` is refused with a
   pointer to `changed(ev)`.
-- **Time windows.** With no `--end`, the effective end is the file's last
+- **Search time windows.** With no `--end`, the effective end is the file's last
   timestamp, and a `--begin` past it is an error. With an explicit `--end`
   beyond the last timestamp, the last known state is extended into the window
   (the same last-known-value persistence used by `snapshot`/`compare`).

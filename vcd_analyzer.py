@@ -75,7 +75,7 @@ Notes:
   empty waveforms are reported as an input/data issue rather than as a false
   "no match" result.
 
-  Time windows: with no --end, the effective end is the file's last timestamp.
+  Search time windows: with no --end, the effective end is the file's last timestamp.
   With an explicit --end beyond the last timestamp, the last known state is
   extended into that window (the same last-known-value persistence used by
   snapshot/compare); a --begin past the last timestamp without --end is an
@@ -99,6 +99,7 @@ import re
 import math
 import json
 import argparse
+import tempfile
 from collections import defaultdict
 from functools import lru_cache
 
@@ -153,6 +154,12 @@ MAX_SCOPE_DEPTH = 256             # $scope nesting depth (fail-fast: lost scope 
 MAX_INITIAL_TOKENS = 131072       # tokens buffered from same line as $enddefinitions $end
                                   # (fail-fast: these are data tokens, dropping them
                                   # would silently corrupt waveforms)
+MAX_DATA_TOKEN_LEN = _env_int('VCD_ANALYZER_MAX_DATA_TOKEN_LEN', 1 << 20)
+
+
+def _check_token_lengths(tokens):
+    if max(map(len, tokens), default=0) > MAX_DATA_TOKEN_LEN:
+        raise _VCDResourceError('VCD token exceeds {} characters'.format(MAX_DATA_TOKEN_LEN))
 
 
 # IEEE 1364-2005 18.2.2 real value_change is 'r' + real_number where
@@ -349,6 +356,8 @@ def parse_time(s, ts_sec):
         raise _TimeParseError(
             'time value too long; max length is {}'.format(MAX_TIME_ARG_LEN))
     stripped = s.strip()
+    if not stripped.isascii() or '_' in stripped:
+        raise _TimeParseError('invalid time value {!r}'.format(s))
     # Anchored match — no \s* between value and unit ('5 ns' must be rejected).
     m = re.match(r'^([+-]?)(\d+\.\d*|\.\d+|\d+)(fs|ps|ns|us|ms|s)?$', stripped)
     if not m:
@@ -388,7 +397,7 @@ def fmt_time(ts, ts_sec):
 
     Picks the smallest unit u where |scaled| < 1000, preferring natural
     boundaries. E.g. with timescale 1ns, #5 prints as '5ns' not '5000ps';
-    #17534700 prints as '17.5347us'.
+    #17534700 prints as '17.5347ms'.
 
     Defensive: non-finite ts or ts_sec produces '?', not 'infs' / 'nans'.
     """
@@ -540,6 +549,8 @@ def _normalize_filter_patterns(value):
                 'too many wildcard characters in filter pattern; max is {}'.format(
                     MAX_FILTER_WILDCARDS))
         out.append(pat)
+    if not out:
+        raise _FilterParseError('filter contains no usable patterns')
     return out
 
 
@@ -551,19 +562,16 @@ def _glob_lite_regex(pattern):
     avoids fnmatch's character-class syntax so documented filters like
     '*data[7:0]' match the literal signal path 'tb.data[7:0]'.
 
-    Pattern length and wildcard count are already bounded by
-    _normalize_filter_patterns(), so the generated regex is small and safe.
+    Interior stars commit to their earliest match, preventing exponential backtracking.
     """
-    parts = ['^']
-    for ch in pattern:
-        if ch == '*':
-            parts.append('.*')
-        elif ch == '?':
-            parts.append('.')
-        else:
-            parts.append(re.escape(ch))
-    parts.append('$')
-    return re.compile(''.join(parts))
+    pieces = [''.join('.' if ch == '?' else re.escape(ch) for ch in part)
+              for part in re.sub(r'\*+', '*', pattern).split('*')]
+    parts = [pieces[0]]
+    for i, piece in enumerate(pieces[1:-1], 1):
+        parts.append(r'(?=(.*?{}))\{}'.format(piece, i))
+    if len(pieces) > 1:
+        parts.append('.*' + pieces[-1])
+    return re.compile('^' + ''.join(parts) + '$')
 
 
 # -- VCD Parser with bit-exploded signal reassembly -------------------------
@@ -771,9 +779,25 @@ class VCDParser:
 
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             while not done:
-                line = f.readline()
+                line = f.readline(MAX_DATA_TOKEN_LEN + 1)
                 if not line:
                     break
+                if len(line) == MAX_DATA_TOKEN_LEN + 1 and not line[-1].isspace():
+                    tail_len = len(line.rsplit(None, 1)[-1])
+                    suffix = []
+                    while True:
+                        if tail_len > MAX_DATA_TOKEN_LEN:
+                            raise _VCDResourceError('VCD token exceeds {} characters'.format(MAX_DATA_TOKEN_LEN))
+                        ch = f.read(1)
+                        if not ch:
+                            break
+                        suffix.append(ch)
+                        if ch.isspace():
+                            break
+                        tail_len += 1
+                    line += ''.join(suffix)
+                toks = line.split()
+                _check_token_lengths(toks)
 
                 # Fast path: one complete declaration on this line, with $end
                 # on the same line, and we are not mid-section. Anything that
@@ -782,7 +806,6 @@ class VCDParser:
                 if current_kw is None:
                     stripped = line.strip()
                     if stripped:
-                        toks = stripped.split()
                         # Valid ONLY for a single self-contained declaration:
                         # exactly one $end, as the final token. A free-format
                         # line may legally pack several declarations
@@ -832,7 +855,7 @@ class VCDParser:
                         # below already buffers them into _initial_tokens with
                         # the correct fail-fast cap.
 
-                for tok in line.split():
+                for tok in toks:
                     if done:
                         # Buffer tokens that share the same line as
                         # `$enddefinitions $end`. These are data tokens
@@ -1134,14 +1157,18 @@ class VCDParser:
                               chunk.rfind('\r'), chunk.rfind('\v'), chunk.rfind('\f'))
                     if cut < 0:
                         carry = chunk
+                        _check_token_lengths((carry,))
                         continue
                     carry = chunk[cut + 1:]
+                    _check_token_lengths((carry,))
                     chunk = chunk[:cut]
                 toks = chunk.split()
+                _check_token_lengths(toks)
                 if toks:
                     yield toks
         if carry:
             tail = carry.split()
+            _check_token_lengths(tail)
             if tail:
                 yield tail
 
@@ -1250,7 +1277,8 @@ class VCDParser:
 
         return None
 
-    def _scan_timestamps(self, token_lists, stop_at_first=False, resync=False):
+    def _scan_timestamps(self, token_lists, stop_at_first=False, resync=False,
+                         stop_at_value=False):
         """Replay iter_events()'s top-level grammar over token_lists, ignoring
         the values themselves, to extract timestamps for scan_time_range().
 
@@ -1345,10 +1373,16 @@ class VCDParser:
                     return first_ts, saw_value, last_ts
                 continue
             # ---- value change (the value itself is irrelevant here) ----
+            parsed = None
             if c0 in '01xXzZ' and len(tok) > 1:
-                saw_value = True
+                parsed = tok[1:], tok[0]
             elif c0 in 'bBrRp':
-                if self._consume_value_change(tok, _next, pushback) is not None:
+                parsed = self._consume_value_change(tok, _next, pushback)
+            if parsed is not None:
+                if stop_at_value:
+                    if parsed[0] in self.signals or parsed[0] in self._bit_map:
+                        return first_ts, True, last_ts
+                else:
                     saw_value = True
             # else: stray token (bare '#', 'b', ...) — ignore
         return first_ts, saw_value, last_ts
@@ -1724,8 +1758,11 @@ class VCDParser:
                 n = len(data)
                 while j < n and data[j] not in _ASCII_WS_BYTES:
                     j += 1
+                    if j > MAX_DATA_TOKEN_LEN:
+                        raise _VCDResourceError('VCD token exceeds {} characters'.format(MAX_DATA_TOKEN_LEN))
                 data = data[j:]
             toks = data.decode('ascii', errors='replace').split()
+            _check_token_lengths(toks)
             _, _, last = self._scan_timestamps([toks], resync=(start > floor))
             if last is not None:
                 t_max = last
@@ -1784,8 +1821,43 @@ class VCDParser:
 _DEFAULT_LIMIT = 500
 
 
+class _ResultRows:
+    """Disk-backed rows for unlimited output."""
+
+    def __init__(self):
+        self.file = tempfile.TemporaryFile(mode='w+t', encoding='utf-8')
+        self.count = 0
+
+    def append(self, row):
+        self.file.write(json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n')
+        self.count += 1
+
+    def __len__(self):
+        return self.count
+
+    def __iter__(self):
+        self.file.seek(0)
+        for line in self.file:
+            yield json.loads(line)
+
+
 def _json(obj):
     """Compact JSON for agent use."""
+    if any(isinstance(value, _ResultRows) for value in obj.values()):
+        write = sys.stdout.write
+        write('{')
+        for i, (key, value) in enumerate(obj.items()):
+            write((',' if i else '') + json.dumps(key) + ':')
+            if isinstance(value, _ResultRows):
+                write('[')
+                value.file.seek(0)
+                for j, line in enumerate(value.file):
+                    write((',' if j else '') + line.rstrip('\n'))
+                write(']')
+            else:
+                write(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
+        write('}\n')
+        return
     print(json.dumps(obj, ensure_ascii=False, separators=(',', ':')))
 
 
@@ -2587,6 +2659,14 @@ def _values_text(values):
 
 
 def _search_end_time(vcd, t0, t1):
+    tokens = vcd._data_token_lists(chunk_size=65536)
+    try:
+        _, saw_value, _ = vcd._scan_timestamps(tokens, stop_at_value=True)
+    finally:
+        tokens.close()
+    if not saw_value:
+        raise _ConditionParseError(
+            'search cannot evaluate condition: VCD data section contains no value changes')
     if t1 is not None:
         return t1
     _mn, mx = vcd.scan_time_range()
@@ -2891,10 +2971,9 @@ def cmd_dump(vcd, args):
     # instead of one per event.
 
     if args.json:
-        # JSON output needs the full event list materialized for serialization.
         total = 0
         truncated = False
-        events = []
+        events = _ResultRows() if limit == 0 else []
         last_t = object()
         last_th = None
         for t, sid, val in vcd.iter_events(t0, t1, sids):
@@ -3186,7 +3265,7 @@ def cmd_search(vcd, args):
         # is a property of the tick, not of any one record, so such a clause
         # reports the tick once.
         state = {}
-        events = []
+        events = _ResultRows() if limit == 0 else []
         total = 0
         truncated = False
         changed_set = set(changed_sids)
@@ -3225,16 +3304,20 @@ def cmd_search(vcd, args):
                 continue
 
             fired = []      # (ov_sid, ov_val) per emitted row
-            if any(_conditions_hold(state, cl, tick_changed) for cl in multi_clauses):
-                # Coincidence is a tick property: report the tick once, with
-                # every shown signal at its settled value.
-                fired.append((None, None))
-            else:
-                for esid, edge_val in edges:
-                    for cl in by_edge_sid.get(esid, ()):
-                        if _conditions_hold(state, cl, tick_changed, esid, edge_val):
-                            fired.append((esid, edge_val))
-                            break
+            for esid, edge_val in edges:
+                for cl in by_edge_sid.get(esid, ()):
+                    if _conditions_hold(state, cl, tick_changed, esid, edge_val):
+                        fired.append((esid, edge_val))
+                        break
+            for cl in multi_clauses:
+                if not _conditions_hold(state, cl, tick_changed):
+                    continue
+                edge_sids = {c['sid'] for c in cl if c['kind'] == 'changed'}
+                if not any(sid in edge_sids and
+                           _conditions_hold(state, cl, tick_changed, sid, val)
+                           for sid, val in fired):
+                    fired.insert(0, (None, None))
+                    break
             for ov_sid, ov_val in fired:
                 total += 1
                 if limit != 0 and len(events) >= limit:
@@ -3280,7 +3363,7 @@ def cmd_search(vcd, args):
     has_show = bool(show_sids)
     # Single-pass: build state up to t0, then process intervals t0+..t1
     state = {}
-    results = []
+    results = _ResultRows() if limit == 0 else []
     total = 0
     truncated = False
 
@@ -3515,6 +3598,10 @@ def main():
         sys.exit('Error: not a file: {}'.format(e.filename or args.file))
     except PermissionError as e:
         sys.exit('Error: permission denied: {}'.format(e.filename or args.file))
+    except BrokenPipeError:
+        raise
+    except OSError as e:
+        sys.exit('Error: ' + str(e))
     except _TimeParseError as e:
         sys.exit('Error: ' + str(e))
     except _LimitParseError as e:

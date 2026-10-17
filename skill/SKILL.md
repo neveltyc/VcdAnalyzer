@@ -14,8 +14,8 @@ All commands support `--json` for structured output. **Always use `--json` when 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.5/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.5.5
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.6/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.5.6
 ```
 
 No pip install, no virtualenv, no dependencies. Python 3.9+.
@@ -55,7 +55,7 @@ User wants to know...
 
 ### Time argument format
 
-Bare integer = raw VCD ticks. With unit suffix = converted using the file's `$timescale`.
+Bare integer = raw VCD ticks. With unit suffix = converted exactly using the file's `$timescale`; a value that is not a whole number of ticks is rounded and a warning is printed on stderr.
 
 Valid: `0`, `100ns`, `17.5us`, `1ms`, `500ps`, `200fs`, `.5ns`
 Invalid: `10.5` (ambiguous — use `10.5ns`), `5 ns` (no space allowed), `1_0`, `١٢` (ASCII digits only)
@@ -110,7 +110,7 @@ Values are formatted: scalars as `0`/`1`/`x`/`z`, vectors as `decimal (0xhex)`, 
 python3 vcd_analyzer.py --json summary <file> [--begin T] [--end T] [--filter K1,K2]
 ```
 
-Key JSON fields: `rows[].path`, `rows[].kind` (`active`/`static`), `rows[].changes`, `rows[].rise_count`/`fall_count` (1-bit signals only), `rows[].init`, `rows[].last`, `rows[].unique`.
+Key JSON fields: `rows[].path`, `rows[].kind` (`active`/`static`), `rows[].changes`, `rows[].rise_count`/`fall_count` (1-bit logic signals only; null for event variables and multi-bit vectors), `rows[].init`, `rows[].last`, `rows[].unique`, `rows[].defined_at_ticks` (present when the signal was first observed inside the window; that first value is `init`, not a change). Event variables count every trigger.
 
 Use to quickly identify which signals are toggling in a time window and which are stuck.
 
@@ -299,7 +299,7 @@ Every time value appears in three forms:
 
 ### Bit-exploded bus reassembly
 
-QuestaSim writes a 32-bit bus as 32 separate 1-bit `$var` declarations with `[N]` suffixes. The tool auto-reassembles these into a single `bus[31:0]` signal. The `info` command reports `synthesized_buses` count. This is transparent — reassembled buses appear as normal multi-bit signals in all commands.
+QuestaSim writes a 32-bit bus as 32 separate 1-bit `$var` declarations with `[N]` suffixes. The tool auto-reassembles these into a single `bus[31:0]` signal; a contiguous run that does not start at bit 0 (for example bits 8..15) becomes the part-select `bus[15:8]`. Gapped or single bit-selects stay individual `bus[N]` signals. All bits of one bus that change at the same timestamp are reported as one event. The `info` command reports `synthesized_buses` count. This is transparent — reassembled buses appear as normal multi-bit signals in all commands.
 
 ---
 

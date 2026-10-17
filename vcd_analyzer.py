@@ -91,7 +91,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.5.5'
+__version__ = '1.5.6'
 
 import sys
 import os
@@ -101,11 +101,52 @@ import json
 import argparse
 import tempfile
 from collections import defaultdict
+from fractions import Fraction
 from functools import lru_cache
 
 # -- Time utilities ----------------------------------------------------------
 
 _UNITS = {'fs': 1e-15, 'ps': 1e-12, 'ns': 1e-9, 'us': 1e-6, 'ms': 1e-3, 's': 1.0}
+# Exact unit sizes in femtoseconds. Time conversion and display use integer
+# femtosecond arithmetic so a tick count is never rounded through a float.
+_UNIT_FS = {'fs': 1, 'ps': 10 ** 3, 'ns': 10 ** 6, 'us': 10 ** 9, 'ms': 10 ** 12, 's': 10 ** 15}
+_DISPLAY_UNITS = ('fs', 'ps', 'ns', 'us', 'ms', 's')
+
+
+@lru_cache(maxsize=64)
+def _tick_fs(ts_sec):
+    """Exact femtoseconds per tick for a float timescale, or None.
+
+    Every timescale the parser produces is an integer multiple of 1 fs, so the
+    float is recovered exactly by rounding. A non-integral or non-finite value
+    (only reachable through direct API calls) returns None and callers fall
+    back to float arithmetic.
+    """
+    try:
+        fs = ts_sec / 1e-15
+    except TypeError:
+        return None
+    if not math.isfinite(fs) or fs < 0.5:
+        return None
+    n = round(fs)
+    if abs(fs - n) > 1e-6 * n:
+        return None
+    return n
+
+
+_warned = set()
+
+
+def _warn(msg, cat=None):
+    """Emit one stderr warning per category/message; stdout/JSON stay clean."""
+    key = cat if cat is not None else msg
+    if key in _warned:
+        return
+    _warned.add(key)
+    try:
+        sys.stderr.write('Warning: {}\n'.format(msg))
+    except (OSError, ValueError):
+        pass
 
 
 # Resource limits — generous defaults that never trip on real engineering
@@ -203,6 +244,10 @@ _DEL_4STATE_LOWER = {ord(c): None for c in '01xz'}     # canonical lowercase
 _DEL_MASK_LOWER = {ord(c): None for c in '01xz?'}      # 4-state + don't-care
 _DEL_4STATE_CI = {ord(c): None for c in '01xXzZ'}      # raw VCD, case-insensitive
 
+# VCD vector left-extension fill (IEEE 1364 Table 18-1), keyed by the MSB of a
+# lowercase 4-state value: x/z extend themselves, 0/1 extend with 0.
+_PAD_CHAR = {'0': '0', '1': '0', 'x': 'x', 'z': 'z'}
+
 # Extended VCD port state character → 4-state mapping (IEEE 1364-2005 18.4.3.1).
 # Strengths (driver levels 0-7) are not exposed; for RTL debug the 4-state value
 # is what matters. Conflict states (d/u/l/h) collapse to their logical level.
@@ -226,17 +271,23 @@ def _parse_timescale(text):
     default — to avoid downstream division-by-zero in parse_time and CPU
     DoS from int() on huge digit strings (Python 3.9 is O(n^2)).
     """
+    ts = _parse_timescale_strict(text)
+    return 1e-12 if ts is None else ts
+
+
+def _parse_timescale_strict(text):
+    """Like _parse_timescale, but None instead of the 1 ps fallback."""
     m = re.search(r'(\d+)\s*(fs|ps|ns|us|ms|s)', text)
     if not m:
-        return 1e-12
+        return None
     digits = m.group(1)
     # Length cap matches parse_time's MAX_TIME_ARG_LEN. The standard allows
     # only 1/10/100 (≤3 digits), so anything multi-line absurd is corruption.
     if len(digits) > MAX_TIME_ARG_LEN:
-        return 1e-12
+        return None
     n = int(digits)
     if n <= 0:
-        return 1e-12
+        return None
     return n * _UNITS[m.group(2)]
 
 
@@ -383,6 +434,17 @@ def parse_time(s, ts_sec):
     if ts_sec <= 0:
         raise _TimeParseError(
             'cannot convert time with unit because VCD $timescale is 0 or invalid')
+    tick = _tick_fs(ts_sec)
+    if tick is not None:
+        # Exact rational conversion: '17.55us' on a 1ps timescale is exactly
+        # 17550000 ticks, independent of float representation, and tick counts
+        # beyond 2**53 keep every digit.
+        exact = Fraction(val_str) * _UNIT_FS[unit] / tick
+        ticks = round(exact)
+        if exact.denominator != 1:
+            _warn('time argument is not a whole number of timescale ticks; '
+                  'rounded to nearest tick', cat='time_rounding')
+        return _check_time_range(ticks, s)
     try:
         scaled = float(val_str) * _UNITS[unit] / ts_sec
     except (OverflowError, ValueError, ZeroDivisionError):
@@ -412,6 +474,22 @@ def fmt_time(ts, ts_sec):
         return '?'
     if ts_sec <= 0:
         return '?'
+    tick = _tick_fs(ts_sec) if isinstance(ts, int) else None
+    if tick is not None:
+        # Exact decimal rendering: distinct ticks never print identically
+        # (%g kept only 6 significant digits, so 17534712ns and 17534713ns
+        # both showed as 17.5347ms).
+        total = ts * tick
+        mag = -total if total < 0 else total
+        for u in _DISPLAY_UNITS:
+            div = _UNIT_FS[u]
+            if mag < 1000 * div or u == 's':
+                q, r = divmod(mag, div)
+                text = str(q)
+                if r:
+                    width = len(str(div)) - 1
+                    text += '.' + str(r).zfill(width).rstrip('0')
+                return ('-' if total < 0 else '') + text + u
     sec = ts * ts_sec
     # u == 's' always matches the bound below, so the loop always returns.
     for u in ('fs', 'ps', 'ns', 'us', 'ms', 's'):
@@ -777,11 +855,19 @@ class VCDParser:
             if rec is not None:
                 append_raw(rec)
 
+        ts_valid = None   # None: no $timescale seen; False: unparseable body
+        first_line = True
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             while not done:
                 line = f.readline(MAX_DATA_TOKEN_LEN + 1)
                 if not line:
                     break
+                if first_line:
+                    # A UTF-8 byte-order mark glued to the first keyword hid
+                    # it ('\ufeff$timescale'), silently falling back to 1 ps.
+                    first_line = False
+                    if line.startswith('\ufeff'):
+                        line = line[1:]
                 if len(line) == MAX_DATA_TOKEN_LEN + 1 and not line[-1].isspace():
                     tail_len = len(line.rsplit(None, 1)[-1])
                     suffix = []
@@ -836,7 +922,9 @@ class VCDParser:
                         elif single and stripped.startswith('$timescale '):
                             ts_body = ' '.join(toks[1:-1])
                             self.ts_str = '$timescale ' + ts_body + ' $end'
-                            self.ts_sec = _parse_timescale(ts_body)
+                            ts_parsed = _parse_timescale_strict(ts_body)
+                            ts_valid = ts_parsed is not None
+                            self.ts_sec = ts_parsed if ts_valid else 1e-12
                             continue
                         elif single and (stripped.startswith('$date ') or
                                          stripped.startswith('$version ') or
@@ -879,7 +967,9 @@ class VCDParser:
                         if current_kw == '$timescale':
                             ts_body = ' '.join(body)
                             self.ts_str = '$timescale ' + ts_body + ' $end'
-                            self.ts_sec = _parse_timescale(ts_body)
+                            ts_parsed = _parse_timescale_strict(ts_body)
+                            ts_valid = ts_parsed is not None
+                            self.ts_sec = ts_parsed if ts_valid else 1e-12
                         elif current_kw == '$scope' and len(body) >= 2:
                             # Cap nesting depth to defend against
                             # 1M-level $scope-without-$upscope construction.
@@ -919,6 +1009,15 @@ class VCDParser:
                         if len(body) < MAX_HEADER_BODY_TOKENS:
                             body.append(tok)
             self._data_offset = f.tell()
+
+        # Resolved here, surfaced by main() on stderr: a missing or unreadable
+        # $timescale silently scaled every reported time by the 1 ps default.
+        if ts_valid is None:
+            self.timescale_warning = 'no $timescale declaration; assuming 1ps'
+        elif not ts_valid:
+            self.timescale_warning = 'cannot parse {}; assuming 1ps'.format(self.ts_str)
+        else:
+            self.timescale_warning = None
 
         # Phase 2: detect and reassemble bit-exploded signals.
         # Bit-exploded heuristic per QuestaSim convention: each bit is a
@@ -974,17 +1073,16 @@ class VCDParser:
                 continue
             standalone.append((sym, name, w, sc, vtype))
 
-        # Partition bit_groups: contiguous-from-0 with ≥2 bits → reassemble;
-        # everything else → individual bit-select references. A single
-        # '[0]' declaration alone is NOT a bus — it's a partial dump that
-        # happens to use bit 0; synthesizing it as 'data[0:0]' would lie
-        # about the file structure.
+        # Partition bit_groups: a contiguous run lo..hi with ≥2 bits →
+        # reassemble as name[hi:lo] (a field such as bus[15:8] is a legal
+        # part-select dump; no phantom bits outside the declared run are
+        # synthesized); everything else → individual bit-select references.
+        # A single '[N]' declaration alone is NOT a bus.
         #
-        # DoS guard: do NOT compute set(range(max+1)) — a malicious VCD with
+        # DoS guard: do NOT compute set(range(lo, hi+1)) — a malicious VCD with
         # 'bus[0]' + 'bus[1000000000]' would force materialization of a
-        # billion-element set (gigabytes of RAM). Indices [0..max] form a
-        # contiguous run iff: count == max+1 AND 0 is present. Both checks
-        # are O(1) on dict_keys.
+        # billion-element set (gigabytes of RAM). Distinct indices form a
+        # contiguous run iff count == hi - lo + 1, an O(n) min/max check.
         non_contiguous = set(duplicate_bit_groups)
         for key, bits in bit_groups.items():
             if key in non_contiguous:
@@ -994,8 +1092,7 @@ class VCDParser:
             if n < 2:
                 non_contiguous.add(key)
                 continue
-            max_idx = max(indices)
-            if max_idx + 1 != n or 0 not in indices:
+            if max(indices) - min(indices) + 1 != n:
                 non_contiguous.add(key)
 
         # Each non-contiguous bit-select becomes a standalone 'name[idx]' signal
@@ -1022,8 +1119,10 @@ class VCDParser:
             if not bits or (sc, name) in non_contiguous:
                 continue
             max_bit = max(bits.keys())
-            width = max_bit + 1
-            path = '{}.{}[{}:0]'.format(sc, name, max_bit) if sc else '{}[{}:0]'.format(name, max_bit)
+            min_bit = min(bits.keys())
+            width = max_bit - min_bit + 1
+            ref = '{}[{}:{}]'.format(name, max_bit, min_bit)
+            path = '{}.{}'.format(sc, ref) if sc else ref
             sig_id = '__grp__{}__{}'.format(sc, name)
             self.signals[sig_id] = {
                 'path': path, 'width': width,
@@ -1039,7 +1138,7 @@ class VCDParser:
             # use '!'), each is a separate synthesized signal that must
             # update independently. _bit_map is therefore 1-to-many.
             for idx, sym in bits.items():
-                self._bit_map.setdefault(sym, []).append((sig_id, idx))
+                self._bit_map.setdefault(sym, []).append((sig_id, idx - min_bit))
 
         # Raw $var counts (transparent to IEEE 1364 spec) so 'info' can
         # report accurate metadata even when reassembly collapses many
@@ -1074,6 +1173,14 @@ class VCDParser:
                 self._sid_kind[_sid] = 'vector'
             else:
                 self._sid_kind[_sid] = 'scalar'
+        # Declared width of every multi-bit logic signal. Writers drop redundant
+        # MSBs (IEEE 1364 Table 18-1), so 'b11' and 'b0011' are the same 4-bit
+        # value; the change stream left-extends short vector values to this
+        # width so no-op suppression, summary counts and compare see one
+        # canonical spelling instead of reporting '3 -> 3' as a change.
+        self._vec_width = {
+            _sid: _info['width'] for _sid, _info in self.signals.items()
+            if self._sid_kind[_sid] == 'vector' and _info['width'] > 1}
 
     def match(self, keywords):
         """Return set of sig_ids matching any pattern, or None for all.
@@ -1459,7 +1566,22 @@ class VCDParser:
             pending.append((sid, prev, val))
             last_val[sid] = val
 
+        # Synthesized bit-exploded buses are written one bit per record, so the
+        # per-record view would expose cross-bit intermediates ('xx0','x00',
+        # '000') that never existed in the design. Buffer each bus's bit writes
+        # per tick and record the assembled value once at the tick boundary; a
+        # second write to the SAME bit inside one tick is a genuine delta-cycle
+        # step, so the bus value is recorded before that bit is overwritten.
+        bus_dirty = {}     # gid -> set of bit indices written in the current tick
+
+        def _commit_buses():
+            for gid in bus_dirty:
+                _record(gid, ''.join(reversed(bit_state[gid])))
+            bus_dirty.clear()
+
         def _flush():
+            if bus_dirty:
+                _commit_buses()
             if not pending:
                 return []
             items = list(pending)
@@ -1478,6 +1600,7 @@ class VCDParser:
         list_iter = self._data_token_lists()
         pushback = []
         signals = self.signals
+        vec_width = self._vec_width
         toks = ()
         ntoks = 0
         ti = 0
@@ -1627,7 +1750,10 @@ class VCDParser:
                     if sids is None or sym in sids:
                         info = signals.get(sym)
                         if info is not None:
-                            if len(val) > info['width']:
+                            w = vec_width.get(sym)
+                            if w is not None and len(val) < w and _is_4state_bits(val):
+                                val = val.rjust(w, _PAD_CHAR[val[0]])
+                            elif len(val) > info['width']:
                                 val = _clamp_overwide_logic_value(val, info)
                             last_val[sym] = val
                     continue
@@ -1646,9 +1772,17 @@ class VCDParser:
                 if sym in bit_map:
                     bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
                     for gid, idx in bit_map[sym]:
-                        bit_state[gid][idx] = bit_val
                         if sids is None or gid in sids:
-                            _record(gid, ''.join(reversed(bit_state[gid])))
+                            written = bus_dirty.get(gid)
+                            if written is None:
+                                bus_dirty[gid] = {idx}
+                            elif idx in written:
+                                if bit_state[gid][idx] != bit_val:
+                                    _record(gid, ''.join(reversed(bit_state[gid])))
+                                bus_dirty[gid] = {idx}
+                            else:
+                                written.add(idx)
+                        bit_state[gid][idx] = bit_val
 
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).
@@ -1657,22 +1791,22 @@ class VCDParser:
                     continue
                 if sids is not None and sym not in sids:
                     continue
-                # Inline the over-wide clamp guard. A scalar value (len 1) can
-                # never exceed a declared width >= 1, and on real dumps ~93% of
-                # standalone values are scalars and over-wide values are absent
-                # entirely — so calling _clamp_overwide_logic_value() for every
-                # event is almost pure call/dict/len overhead across tens of
-                # millions of events. Take the function only when the value is
-                # actually long enough to possibly need clamping; the helper
-                # remains the single source of truth for that rare case.
-                if len(val) == 1:
+                # One width read covers every case. n == w is the overwhelming
+                # majority (scalars, full-width vectors). Short logic-vector
+                # values are left-extended to the declared width (see
+                # _vec_width) so equal values share one spelling; real/event
+                # values are never padded. Over-wide values go through the
+                # clamp helper, the single source of truth for that rare case.
+                n = len(val)
+                w = info['width']
+                if n == w:
+                    _record(sym, val)
+                elif n < w:
+                    if sym in vec_width and _is_4state_bits(val):
+                        val = val.rjust(w, _PAD_CHAR[val[0]])
                     _record(sym, val)
                 else:
-                    w = info.get('width')
-                    if w is None or len(val) <= w:
-                        _record(sym, val)
-                    else:
-                        _record(sym, _clamp_overwide_logic_value(val, info))
+                    _record(sym, _clamp_overwide_logic_value(val, info))
 
             # Final flush
             if cur_t >= t0:
@@ -2721,9 +2855,15 @@ def _summary_rows(vcd, t0, t1, sids):
     exactly at --begin are counted as in-window events, fixing the boundary
     black-hole where transitions at the window edge were silently dropped).
 
-    Static means known in baseline and no value changes inside the window.
-    Undefined means selected but not known in baseline and no value changes
-    inside the window. No unknown values are invented.
+    Static means known (in the baseline, or first defined inside the window)
+    with no value changes inside the window. Undefined means selected but never
+    observed up to the window end. No unknown values are invented.
+
+    Counting matches `search changed()`: a signal's first observation is not
+    a change. A signal first defined inside the window takes that value as its
+    `init` and reports `defined_at`; only later transitions count. Event
+    variables count every trigger in [t0, t1] (they are markers, not levels),
+    including triggers at t=0.
 
     For 1-bit signals, rise/fall counts are reported for clean 0->1 and 1->0
     transitions only. x/z-related transitions still count as changes, but not
@@ -2748,7 +2888,8 @@ def _summary_rows(vcd, t0, t1, sids):
     stats = {}
 
     def _make_stats(info, init_val):
-        is_scalar = info['width'] == 1
+        # rise/fall apply to 1-bit levels; an event variable has no level.
+        is_scalar = info['width'] == 1 and info.get('type') != 'event'
         return {
             'changes': 0, 'first_at': None, 'last_at': None,
             'initial': init_val, 'last': init_val,
@@ -2759,8 +2900,9 @@ def _summary_rows(vcd, t0, t1, sids):
             'scalar': is_scalar,
         }
 
-    for t, sid, prev, val, _kind in vcd.iter_transitions(0, t1, selected):
-        if t <= init_boundary:
+    for t, sid, prev, val, kind in vcd.iter_transitions(0, t1, selected):
+        is_event = kind == 'event'
+        if t <= init_boundary and not (is_event and t >= t0):
             baseline[sid] = val
             continue
 
@@ -2768,6 +2910,12 @@ def _summary_rows(vcd, t0, t1, sids):
         # initialize stats from baseline snapshot (if any).
         if sid not in stats:
             init_val = baseline.pop(sid, None)
+            if init_val is None and prev is None and not is_event:
+                # First observation inside the window: it defines the signal,
+                # it is not a transition (same rule as search changed()).
+                stats[sid] = _make_stats(vcd.signals[sid], val)
+                stats[sid]['defined_at'] = t
+                continue
             stats[sid] = _make_stats(vcd.signals[sid], init_val)
 
         s = stats[sid]
@@ -2779,8 +2927,8 @@ def _summary_rows(vcd, t0, t1, sids):
         # triggers at the same value are likewise not double-counted here — dump
         # and search --changed expose each trigger; summary counts genuine value
         # transitions.
-        if val != prev:
-            if s['scalar']:
+        if val != prev or is_event:
+            if s['scalar'] and not is_event:
                 if prev == '0' and val == '1':
                     s['rise_count'] += 1
                 elif prev == '1' and val == '0':
@@ -2819,6 +2967,9 @@ def _summary_rows(vcd, t0, t1, sids):
             'init': _fmt_maybe(s['initial'], info),
             'last': _fmt_maybe(s['last'], info),
         }
+        if s.get('defined_at') is not None:
+            row['defined_at_ticks'] = s['defined_at']
+            row['defined_at_h'] = fmt_time(s['defined_at'], vcd.ts_sec)
         if s['first_at'] is not None:
             row['first_at_ticks'] = s['first_at']
             row['first_at'] = fmt_time(s['first_at'], vcd.ts_sec)
@@ -2938,18 +3089,18 @@ def cmd_list(vcd, args):
                     e['raw_bits'] = info.get('raw_bits')
             entries.append(e)
     entries.sort(key=lambda e: e['path'])
+    aliases_total = sum(len(info['aliases']) for info in vcd.signals.values())
     shown, trunc = _clip(entries, limit)
     if args.json:
-        _json({'total': len(entries), 'shown': len(shown), 'truncated': trunc,
+        _json({'total': len(entries), 'aliases_total': aliases_total,
+               'shown': len(shown), 'truncated': trunc,
                **_trunc_hint(trunc, len(shown), len(entries), True, 'signals'),
                'signals': shown})
     else:
-        # Numerator and denominator are both counts of matched alias paths:
-        # 'entries' holds one row per alias of each MATCHED signal, so a signal
-        # with two aliases reads "Matched: 2/2", not "2/1" — and a --filter
-        # denominator counts only the filtered aliases, not every alias in the
-        # file. Matching the JSON branch's total, which is len(entries) too.
-        print('Matched: {}/{}'.format(len(entries), len(entries)))
+        # Numerator and denominator both count alias paths in the signal view
+        # (one row per alias, so a signal with two aliases reads "Matched: 2/2",
+        # not "2/1"): the matched aliases out of all signal aliases.
+        print('Matched: {}/{}'.format(len(entries), aliases_total))
         for e in shown:
             print('  {:<60} {:>5}  {}'.format(e['path'], e['width'], e['type']))
         if trunc:
@@ -3079,6 +3230,7 @@ def cmd_summary(vcd, args):
     print('Active: {}, Static: {}'.format(counts['active'], counts['static']))
     current = None
     for r in shown:
+        dfn = ' defined@{}'.format(r['defined_at_h']) if 'defined_at_h' in r else ''
         if r['kind'] != current:
             current = r['kind']
             print('\n{}'.format(current.upper()))
@@ -3089,19 +3241,20 @@ def cmd_summary(vcd, args):
                 uniq = str(r.get('unique', 0))
                 if not r.get('unique_is_exact', True):
                     uniq += '+'
-                print('  {:<45} w={} {} chg={}{} init={} last={} first@{} last@{} uniq={}'.format(
+                print('  {:<45} w={} {} chg={}{} init={} last={} first@{} last@{} uniq={}{}'.format(
                     r['path'], r['_width'], r['_type'], r['changes'], edge, r['init'], r['last'],
-                    r.get('first_at', '-'), r.get('last_at', '-'), uniq))
+                    r.get('first_at', '-'), r.get('last_at', '-'), uniq, dfn))
             else:
                 edge = '' if r.get('rise_count') is None else ' r={} f={}'.format(
                     r.get('rise_count', 0), r.get('fall_count', 0))
-                print('  {:<45} chg={}{} init={} last={}'.format(
-                    r['path'], r['changes'], edge, r['init'], r['last']))
+                print('  {:<45} chg={}{} init={} last={}{}'.format(
+                    r['path'], r['changes'], edge, r['init'], r['last'], dfn))
         elif r['kind'] == 'static':
             if getattr(args, 'verbose', False):
-                print('  {:<45} w={} {} value={}'.format(r['path'], r['_width'], r['_type'], r['value']))
+                print('  {:<45} w={} {} value={}{}'.format(
+                    r['path'], r['_width'], r['_type'], r['value'], dfn))
             else:
-                print('  {:<45} value={}'.format(r['path'], r['value']))
+                print('  {:<45} value={}{}'.format(r['path'], r['value'], dfn))
         else:
             print('  {:<45} w={} {}'.format(r['path'], r['_width'], r['_type']))
     if not rows and not undef_sids:
@@ -3589,6 +3742,11 @@ def main():
 
     try:
         vcd = VCDParser(args.file)
+        if vcd.timescale_warning:
+            try:
+                sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
+            except (OSError, ValueError):
+                pass
         cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
                 'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search}
         cmds[args.cmd](vcd, args)

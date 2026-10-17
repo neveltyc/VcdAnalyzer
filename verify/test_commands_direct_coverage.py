@@ -137,8 +137,9 @@ def test_summary_counts_intra_timestamp_transitions(tmp_path, capsys):
     va.cmd_summary(v, ns(json=True, begin='0ns', end='30ns'))
     r = load_json_stdout(capsys.readouterr().out)
     row = r['rows'][0]
-    # undef->0, 0->1, 1->0, 0->1
-    assert row['changes'] == 4
+    # First observation (undef->0) defines the signal; then 0->1, 1->0, 0->1
+    assert row['changes'] == 3
+    assert row['init'] == '0' and row['defined_at_ticks'] == 10
     assert row['rise_count'] == 2
     assert row['fall_count'] == 1
 

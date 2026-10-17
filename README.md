@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.5.5-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.5.6-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/tests-247%20passed-22aa55?style=flat-square">
@@ -67,7 +67,7 @@ Single file, no dependencies, Python 3.9+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.5/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.6/vcd_analyzer.py -o vcd_analyzer.py
 
 # Verify
 python vcd_analyzer.py --version
@@ -194,6 +194,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.5.6` | Bit-exploded buses change once per tick and contiguous runs from any bit are reassembled; exact time output and parsing; full-width vector comparison; `summary` counts match `changed()`; BOM/`$timescale` warnings |
 | `1.5.5` | Correct filtered-list counts and search OR events; reject empty waveforms and malformed time/filter arguments; bound token sizes, avoid glob backtracking, and spool unlimited output |
 | `1.5.4` | `search` targets accept don't-care bits: `?` in a binary literal matches any bit value, as in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus), so single bits and fields of a bus can be searched without dumping the whole bus |
 | `1.5.3` | `search` accepts negative targets: a negative real matches real signals (`dac=-1.5`), and a negative decimal on a logic signal means its two's-complement pattern in the declared width (`cnt=-1`, `sbyte=-5`; VCD records no signedness); 4-state targets may carry extra leading zeros; a non-ASCII digit target is a clean error instead of a traceback |

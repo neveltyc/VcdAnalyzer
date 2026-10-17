@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.5-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.6-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
   <img alt="Tests" src="https://img.shields.io/badge/测试-247%20passed-22aa55?style=flat-square">
@@ -65,7 +65,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.5/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.6/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -178,6 +178,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.5.6` | 位拆分总线每个时刻只变化一次，任意起始位的连续位段可重组；时间输出与解析精确；向量按完整位宽比较；`summary` 计数与 `changed()` 一致；BOM 与 `$timescale` 警告 |
 | `1.5.5` | 修正过滤列表计数和搜索 OR 事件；拒绝空波形及非法时间/过滤参数；限制 token 长度、避免 glob 回溯，无限量结果改用临时文件 |
 | `1.5.4` | `search` 目标值支持不关心位:二进制字面量中的 `?` 匹配任意位值,同 Verilog `casez`(`status=b?????1??` 检查 8 位总线的第 2 位),无需 dump 整条总线即可按单个位或位段搜索 |
 | `1.5.3` | `search` 支持负数目标值:负实数可匹配 real 信号(`dac=-1.5`),逻辑信号上的负十进制数按声明位宽的二进制补码匹配(`cnt=-1`、`sbyte=-5`;VCD 不记录有无符号);4 态目标值可带多余前导零;非 ASCII 数字目标值改为正常报错而非抛出 traceback |

@@ -101,11 +101,51 @@ import json
 import argparse
 import tempfile
 from collections import defaultdict
+from fractions import Fraction
 from functools import lru_cache
 
 # -- Time utilities ----------------------------------------------------------
 
 _UNITS = {'fs': 1e-15, 'ps': 1e-12, 'ns': 1e-9, 'us': 1e-6, 'ms': 1e-3, 's': 1.0}
+# Exact unit sizes in femtoseconds. Time conversion and display use integer
+# femtosecond arithmetic so a tick count is never rounded through a float.
+_UNIT_FS = {'fs': 1, 'ps': 10 ** 3, 'ns': 10 ** 6, 'us': 10 ** 9, 'ms': 10 ** 12, 's': 10 ** 15}
+_DISPLAY_UNITS = ('fs', 'ps', 'ns', 'us', 'ms', 's')
+
+
+@lru_cache(maxsize=64)
+def _tick_fs(ts_sec):
+    """Exact femtoseconds per tick for a float timescale, or None.
+
+    Every timescale the parser produces is an integer multiple of 1 fs, so the
+    float is recovered exactly by rounding. A non-integral or non-finite value
+    (only reachable through direct API calls) returns None and callers fall
+    back to float arithmetic.
+    """
+    try:
+        fs = ts_sec / 1e-15
+    except TypeError:
+        return None
+    if not math.isfinite(fs) or fs < 0.5:
+        return None
+    n = round(fs)
+    if abs(fs - n) > 1e-6 * n:
+        return None
+    return n
+
+
+_warned = set()
+
+
+def _warn(msg):
+    """Emit one stderr warning per distinct message; stdout/JSON stay clean."""
+    if msg in _warned:
+        return
+    _warned.add(msg)
+    try:
+        sys.stderr.write('Warning: {}\n'.format(msg))
+    except (OSError, ValueError):
+        pass
 
 
 # Resource limits — generous defaults that never trip on real engineering
@@ -383,6 +423,17 @@ def parse_time(s, ts_sec):
     if ts_sec <= 0:
         raise _TimeParseError(
             'cannot convert time with unit because VCD $timescale is 0 or invalid')
+    tick = _tick_fs(ts_sec)
+    if tick is not None:
+        # Exact rational conversion: '17.55us' on a 1ps timescale is exactly
+        # 17550000 ticks, independent of float representation, and tick counts
+        # beyond 2**53 keep every digit.
+        exact = Fraction(val_str) * _UNIT_FS[unit] / tick
+        ticks = round(exact)
+        if exact.denominator != 1:
+            _warn('time {!r} is not a whole number of timescale ticks; '
+                  'rounded to {} ticks'.format(s, ticks))
+        return _check_time_range(ticks, s)
     try:
         scaled = float(val_str) * _UNITS[unit] / ts_sec
     except (OverflowError, ValueError, ZeroDivisionError):
@@ -412,6 +463,22 @@ def fmt_time(ts, ts_sec):
         return '?'
     if ts_sec <= 0:
         return '?'
+    tick = _tick_fs(ts_sec) if isinstance(ts, int) else None
+    if tick is not None:
+        # Exact decimal rendering: distinct ticks never print identically
+        # (%g kept only 6 significant digits, so 17534712ns and 17534713ns
+        # both showed as 17.5347ms).
+        total = ts * tick
+        mag = -total if total < 0 else total
+        for u in _DISPLAY_UNITS:
+            div = _UNIT_FS[u]
+            if mag < 1000 * div or u == 's':
+                q, r = divmod(mag, div)
+                text = str(q)
+                if r:
+                    width = len(str(div)) - 1
+                    text += '.' + str(r).zfill(width).rstrip('0')
+                return ('-' if total < 0 else '') + text + u
     sec = ts * ts_sec
     # u == 's' always matches the bound below, so the loop always returns.
     for u in ('fs', 'ps', 'ns', 'us', 'ms', 's'):

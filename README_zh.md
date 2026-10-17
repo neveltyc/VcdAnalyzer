@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/版本-1.5.5-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-231%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-247%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -107,6 +107,16 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   逐次计数。仅仅重复断言信号当前值的记录——连续的重复值，或
   `$dumpall`/`$dumpon` 检查点重发当前值——属于 no-op，不产生变化事件
   （`summary` 的 static/active 统计保持精确）。
+- **位拆分总线每个时刻只变化一次。** 重组总线的多个位在同一时间戳变化时，
+  `dump`、`summary` 和 `changed()` 只看到一次组装后的值，不会出现跨位的中间值；
+  同一位在一个时刻内被写两次仍视为 delta-cycle 变化并保留。
+- **向量值按完整位宽比较。** 4 位信号上的 `b11` 与 `b0011` 是同一个值
+  （IEEE 1364 左扩展规则），换一种写法不算变化。
+- **`summary` 与 `changed()` 计数一致。** 信号的首次出现不算变化：窗口内首次
+  出现的信号以该值作为 `init`，并给出 `defined_at`。event 变量每次触发都计数。
+- **时间是精确的。** 文本输出保留每一位 tick（`17.534712ms`）；时间参数不是
+  tick 的整数倍时会四舍五入并在 stderr 给出警告。缺少或无法解析 `$timescale`
+  时按 1ps 处理，并在 stderr 警告。
 - **`search` 的条件是 AND 子句，重复 `--condition` 即 OR。** 一个 `--condition`
   是逗号分隔的 AND 项列表，每项是 `SIG=VAL`、`SIG!=VAL` 或 `changed(SIG)`。
   重复该标志后，任一子句成立的时刻即成立（OR-of-ANDs）——每个通道写一个子句，

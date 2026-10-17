@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/version-1.5.5-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-231%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-247%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -111,6 +111,20 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   value — a consecutive duplicate, or a `$dumpall`/`$dumpon` checkpoint
   re-emitting the current value — is a no-op and adds no change event (so
   `summary` static/active accounting stays exact).
+- **Bit-exploded buses change once per tick.** When several bits of a
+  reassembled bus change at the same timestamp, `dump`, `summary` and
+  `changed()` see one assembled value, never cross-bit intermediates. A bit
+  written twice in one tick is still a delta-cycle step and stays visible.
+- **Vector values are compared at full width.** `b11` and `b0011` on a 4-bit
+  signal are the same value (IEEE 1364 left-extension), so re-spelling a value
+  is not a change.
+- **`summary` counts like `changed()`.** A signal's first observation is not
+  a change: a signal first seen inside the window takes that value as `init`
+  and reports `defined_at`. Event variables count every trigger.
+- **Times are exact.** Text output prints every tick digit (`17.534712ms`);
+  a time argument that is not a whole number of ticks is rounded and a warning
+  goes to stderr. A missing or unparseable `$timescale` falls back to 1ps with
+  a stderr warning.
 - **`search` conditions are AND clauses; repeating `--condition` ORs them.**
   One `--condition` is a comma-separated AND list of `SIG=VAL`, `SIG!=VAL`, or
   `changed(SIG)` terms. Repeat the flag and the search holds wherever *any*

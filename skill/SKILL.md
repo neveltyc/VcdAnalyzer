@@ -55,7 +55,7 @@ User wants to know...
 
 ### Time argument format
 
-Bare integer = raw VCD ticks. With unit suffix = converted using the file's `$timescale`.
+Bare integer = raw VCD ticks. With unit suffix = converted exactly using the file's `$timescale`; a value that is not a whole number of ticks is rounded and a warning is printed on stderr.
 
 Valid: `0`, `100ns`, `17.5us`, `1ms`, `500ps`, `200fs`, `.5ns`
 Invalid: `10.5` (ambiguous — use `10.5ns`), `5 ns` (no space allowed), `1_0`, `١٢` (ASCII digits only)
@@ -110,7 +110,7 @@ Values are formatted: scalars as `0`/`1`/`x`/`z`, vectors as `decimal (0xhex)`, 
 python3 vcd_analyzer.py --json summary <file> [--begin T] [--end T] [--filter K1,K2]
 ```
 
-Key JSON fields: `rows[].path`, `rows[].kind` (`active`/`static`), `rows[].changes`, `rows[].rise_count`/`fall_count` (1-bit signals only), `rows[].init`, `rows[].last`, `rows[].unique`.
+Key JSON fields: `rows[].path`, `rows[].kind` (`active`/`static`), `rows[].changes`, `rows[].rise_count`/`fall_count` (1-bit signals only), `rows[].init`, `rows[].last`, `rows[].unique`, `rows[].defined_at_ticks` (present when the signal was first observed inside the window; that first value is `init`, not a change). Event variables count every trigger.
 
 Use to quickly identify which signals are toggling in a time window and which are stuck.
 

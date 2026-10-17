@@ -3,6 +3,24 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- Bit-exploded buses no longer report cross-bit intermediate values when several bits change at one timestamp (`dump`, `summary`, `search changed()`).
+- Time output keeps every tick digit; `%g` rounding printed distinct ticks identically (17534712ns and 17534713ns were both `17.5347ms`). Time arguments convert exactly, with a stderr warning when rounded to a tick.
+- A UTF-8 BOM no longer hides a leading `$timescale`; a missing or unparseable `$timescale` now warns on stderr before falling back to 1ps.
+- Short vector spellings of one value (`b11` / `b0011`) are no longer reported as changes by `compare`, `summary`, `dump` or `changed()`.
+- `summary` counts match `search changed()`: a first observation inside the window defines the signal (`defined_at`) instead of counting as a change, and event variables count every trigger.
+- `list` text output prints matched aliases out of all aliases in the file instead of N/N; JSON adds `aliases_in_file`.
+
+### Changed
+
+- Contiguous bit-exploded runs that do not start at bit 0 are reassembled as a part-select (`bus[15:8]`).
+- Verbose JSON `raw` values of logic vectors are full width.
+
+Validation: 247 tests pass.
+
 ## [1.5.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.5) - 2026-10-12
 
 ### Fixed

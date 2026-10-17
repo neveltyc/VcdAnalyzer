@@ -299,7 +299,7 @@ Every time value appears in three forms:
 
 ### Bit-exploded bus reassembly
 
-QuestaSim writes a 32-bit bus as 32 separate 1-bit `$var` declarations with `[N]` suffixes. The tool auto-reassembles these into a single `bus[31:0]` signal. The `info` command reports `synthesized_buses` count. This is transparent — reassembled buses appear as normal multi-bit signals in all commands.
+QuestaSim writes a 32-bit bus as 32 separate 1-bit `$var` declarations with `[N]` suffixes. The tool auto-reassembles these into a single `bus[31:0]` signal; a contiguous run that does not start at bit 0 (for example bits 8..15) becomes the part-select `bus[15:8]`. Gapped or single bit-selects stay individual `bus[N]` signals. All bits of one bus that change at the same timestamp are reported as one event. The `info` command reports `synthesized_buses` count. This is transparent — reassembled buses appear as normal multi-bit signals in all commands.
 
 ---
 

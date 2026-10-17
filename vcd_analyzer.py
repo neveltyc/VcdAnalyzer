@@ -1068,17 +1068,16 @@ class VCDParser:
                 continue
             standalone.append((sym, name, w, sc, vtype))
 
-        # Partition bit_groups: contiguous-from-0 with ≥2 bits → reassemble;
-        # everything else → individual bit-select references. A single
-        # '[0]' declaration alone is NOT a bus — it's a partial dump that
-        # happens to use bit 0; synthesizing it as 'data[0:0]' would lie
-        # about the file structure.
+        # Partition bit_groups: a contiguous run lo..hi with ≥2 bits →
+        # reassemble as name[hi:lo] (a field such as bus[15:8] is a legal
+        # part-select dump; no phantom bits outside the declared run are
+        # synthesized); everything else → individual bit-select references.
+        # A single '[N]' declaration alone is NOT a bus.
         #
-        # DoS guard: do NOT compute set(range(max+1)) — a malicious VCD with
+        # DoS guard: do NOT compute set(range(lo, hi+1)) — a malicious VCD with
         # 'bus[0]' + 'bus[1000000000]' would force materialization of a
-        # billion-element set (gigabytes of RAM). Indices [0..max] form a
-        # contiguous run iff: count == max+1 AND 0 is present. Both checks
-        # are O(1) on dict_keys.
+        # billion-element set (gigabytes of RAM). Distinct indices form a
+        # contiguous run iff count == hi - lo + 1, an O(n) min/max check.
         non_contiguous = set(duplicate_bit_groups)
         for key, bits in bit_groups.items():
             if key in non_contiguous:
@@ -1088,8 +1087,7 @@ class VCDParser:
             if n < 2:
                 non_contiguous.add(key)
                 continue
-            max_idx = max(indices)
-            if max_idx + 1 != n or 0 not in indices:
+            if max(indices) - min(indices) + 1 != n:
                 non_contiguous.add(key)
 
         # Each non-contiguous bit-select becomes a standalone 'name[idx]' signal
@@ -1116,8 +1114,10 @@ class VCDParser:
             if not bits or (sc, name) in non_contiguous:
                 continue
             max_bit = max(bits.keys())
-            width = max_bit + 1
-            path = '{}.{}[{}:0]'.format(sc, name, max_bit) if sc else '{}[{}:0]'.format(name, max_bit)
+            min_bit = min(bits.keys())
+            width = max_bit - min_bit + 1
+            ref = '{}[{}:{}]'.format(name, max_bit, min_bit)
+            path = '{}.{}'.format(sc, ref) if sc else ref
             sig_id = '__grp__{}__{}'.format(sc, name)
             self.signals[sig_id] = {
                 'path': path, 'width': width,
@@ -1133,7 +1133,7 @@ class VCDParser:
             # use '!'), each is a separate synthesized signal that must
             # update independently. _bit_map is therefore 1-to-many.
             for idx, sym in bits.items():
-                self._bit_map.setdefault(sym, []).append((sig_id, idx))
+                self._bit_map.setdefault(sym, []).append((sig_id, idx - min_bit))
 
         # Raw $var counts (transparent to IEEE 1364 spec) so 'info' can
         # report accurate metadata even when reassembly collapses many

@@ -243,6 +243,10 @@ _DEL_4STATE_LOWER = {ord(c): None for c in '01xz'}     # canonical lowercase
 _DEL_MASK_LOWER = {ord(c): None for c in '01xz?'}      # 4-state + don't-care
 _DEL_4STATE_CI = {ord(c): None for c in '01xXzZ'}      # raw VCD, case-insensitive
 
+# VCD vector left-extension fill (IEEE 1364 Table 18-1), keyed by the MSB of a
+# lowercase 4-state value: x/z extend themselves, 0/1 extend with 0.
+_PAD_CHAR = {'0': '0', '1': '0', 'x': 'x', 'z': 'z'}
+
 # Extended VCD port state character → 4-state mapping (IEEE 1364-2005 18.4.3.1).
 # Strengths (driver levels 0-7) are not exposed; for RTL debug the 4-state value
 # is what matters. Conflict states (d/u/l/h) collapse to their logical level.
@@ -1747,7 +1751,7 @@ class VCDParser:
                         if info is not None:
                             w = vec_width.get(sym)
                             if w is not None and len(val) < w:
-                                val = (val[0] if val[0] in 'xz' else '0') * (w - len(val)) + val
+                                val = val.rjust(w, _PAD_CHAR[val[0]])
                             elif len(val) > info['width']:
                                 val = _clamp_overwide_logic_value(val, info)
                             last_val[sym] = val
@@ -1786,33 +1790,22 @@ class VCDParser:
                     continue
                 if sids is not None and sym not in sids:
                     continue
-                # Inline the over-wide clamp guard. A scalar value (len 1) can
-                # never exceed a declared width >= 1, and on real dumps ~93% of
-                # standalone values are scalars and over-wide values are absent
-                # entirely — so calling _clamp_overwide_logic_value() for every
-                # event is almost pure call/dict/len overhead across tens of
-                # millions of events. Take the function only when the value is
-                # actually long enough to possibly need clamping; the helper
-                # remains the single source of truth for that rare case.
-                # Short vector values are left-extended to the declared width
-                # (see _vec_width) so equal values share one spelling.
+                # One width read covers every case. n == w is the overwhelming
+                # majority (scalars, full-width vectors). Short logic-vector
+                # values are left-extended to the declared width (see
+                # _vec_width) so equal values share one spelling; real/event
+                # values are never padded. Over-wide values go through the
+                # clamp helper, the single source of truth for that rare case.
                 n = len(val)
-                if n == 1:
-                    w = vec_width.get(sym)
-                    if w is None:
-                        _record(sym, val)
-                    else:
-                        _record(sym, (val if val in 'xz' else '0') * (w - 1) + val)
+                w = info['width']
+                if n == w:
+                    _record(sym, val)
+                elif n < w:
+                    if sym in vec_width:
+                        val = val.rjust(w, _PAD_CHAR[val[0]])
+                    _record(sym, val)
                 else:
-                    w = info.get('width')
-                    if w is None or n == w:
-                        _record(sym, val)
-                    elif n < w:
-                        if sym in vec_width:
-                            val = (val[0] if val[0] in 'xz' else '0') * (w - n) + val
-                        _record(sym, val)
-                    else:
-                        _record(sym, _clamp_overwide_logic_value(val, info))
+                    _record(sym, _clamp_overwide_logic_value(val, info))
 
             # Final flush
             if cur_t >= t0:

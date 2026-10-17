@@ -110,7 +110,7 @@ Values are formatted: scalars as `0`/`1`/`x`/`z`, vectors as `decimal (0xhex)`, 
 python3 vcd_analyzer.py --json summary <file> [--begin T] [--end T] [--filter K1,K2]
 ```
 
-Key JSON fields: `rows[].path`, `rows[].kind` (`active`/`static`), `rows[].changes`, `rows[].rise_count`/`fall_count` (1-bit signals only), `rows[].init`, `rows[].last`, `rows[].unique`, `rows[].defined_at_ticks` (present when the signal was first observed inside the window; that first value is `init`, not a change). Event variables count every trigger.
+Key JSON fields: `rows[].path`, `rows[].kind` (`active`/`static`), `rows[].changes`, `rows[].rise_count`/`fall_count` (1-bit logic signals only; null for event variables and multi-bit vectors), `rows[].init`, `rows[].last`, `rows[].unique`, `rows[].defined_at_ticks` (present when the signal was first observed inside the window; that first value is `init`, not a change). Event variables count every trigger.
 
 Use to quickly identify which signals are toggling in a time window and which are stuck.
 

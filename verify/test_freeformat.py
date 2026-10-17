@@ -173,7 +173,7 @@ def test_minor_list_matched_denominator_counts_aliases(tmp_path):
 def test_minor_list_matched_denominator_respects_filter(tmp_path):
     # With --filter the numerator counts matched aliases and the denominator
     # every alias in the file: one of two single-alias signals -> "1/2".
-    # JSON keeps total = matched count and adds aliases_in_file.
+    # JSON keeps total = matched count and adds aliases_total.
     text = (
         '$timescale 1ns $end\n$scope module tb $end\n'
         '$var wire 1 ! clk $end\n$var wire 1 " rst_n $end\n'
@@ -184,7 +184,7 @@ def test_minor_list_matched_denominator_respects_filter(tmp_path):
     assert 'Matched: 1/2' in out
     obj = json.loads(run_cli(['--json', 'list', '--filter', 'clk', str(p)]).stdout)
     assert obj['total'] == 1
-    assert obj['aliases_in_file'] == 2
+    assert obj['aliases_total'] == 2
 
 
 def test_minor_begin_beyond_eof_message(tmp_path):

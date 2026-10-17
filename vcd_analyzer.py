@@ -137,11 +137,12 @@ def _tick_fs(ts_sec):
 _warned = set()
 
 
-def _warn(msg):
-    """Emit one stderr warning per distinct message; stdout/JSON stay clean."""
-    if msg in _warned:
+def _warn(msg, cat=None):
+    """Emit one stderr warning per category/message; stdout/JSON stay clean."""
+    key = cat if cat is not None else msg
+    if key in _warned:
         return
-    _warned.add(msg)
+    _warned.add(key)
     try:
         sys.stderr.write('Warning: {}\n'.format(msg))
     except (OSError, ValueError):
@@ -441,8 +442,8 @@ def parse_time(s, ts_sec):
         exact = Fraction(val_str) * _UNIT_FS[unit] / tick
         ticks = round(exact)
         if exact.denominator != 1:
-            _warn('time {!r} is not a whole number of timescale ticks; '
-                  'rounded to {} ticks'.format(s, ticks))
+            _warn('time argument is not a whole number of timescale ticks; '
+                  'rounded to nearest tick', cat='time_rounding')
         return _check_time_range(ticks, s)
     try:
         scaled = float(val_str) * _UNITS[unit] / ts_sec
@@ -1750,7 +1751,7 @@ class VCDParser:
                         info = signals.get(sym)
                         if info is not None:
                             w = vec_width.get(sym)
-                            if w is not None and len(val) < w:
+                            if w is not None and len(val) < w and _is_4state_bits(val):
                                 val = val.rjust(w, _PAD_CHAR[val[0]])
                             elif len(val) > info['width']:
                                 val = _clamp_overwide_logic_value(val, info)
@@ -1801,7 +1802,7 @@ class VCDParser:
                 if n == w:
                     _record(sym, val)
                 elif n < w:
-                    if sym in vec_width:
+                    if sym in vec_width and _is_4state_bits(val):
                         val = val.rjust(w, _PAD_CHAR[val[0]])
                     _record(sym, val)
                 else:
@@ -3088,19 +3089,18 @@ def cmd_list(vcd, args):
                     e['raw_bits'] = info.get('raw_bits')
             entries.append(e)
     entries.sort(key=lambda e: e['path'])
-    aliases_in_file = sum(len(info['aliases']) for info in vcd.signals.values())
+    aliases_total = sum(len(info['aliases']) for info in vcd.signals.values())
     shown, trunc = _clip(entries, limit)
     if args.json:
-        _json({'total': len(entries), 'aliases_in_file': aliases_in_file,
+        _json({'total': len(entries), 'aliases_total': aliases_total,
                'shown': len(shown), 'truncated': trunc,
                **_trunc_hint(trunc, len(shown), len(entries), True, 'signals'),
                'signals': shown})
     else:
-        # Numerator and denominator both count alias paths (one row per alias,
-        # so a signal with two aliases reads "Matched: 2/2", not "2/1"): the
-        # matched aliases out of every alias in the file. The previous
-        # matched/matched form always printed N/N and carried no information.
-        print('Matched: {}/{}'.format(len(entries), aliases_in_file))
+        # Numerator and denominator both count alias paths in the signal view
+        # (one row per alias, so a signal with two aliases reads "Matched: 2/2",
+        # not "2/1"): the matched aliases out of all signal aliases.
+        print('Matched: {}/{}'.format(len(entries), aliases_total))
         for e in shown:
             print('  {:<60} {:>5}  {}'.format(e['path'], e['width'], e['type']))
         if trunc:
@@ -3743,7 +3743,10 @@ def main():
     try:
         vcd = VCDParser(args.file)
         if vcd.timescale_warning:
-            _warn(vcd.timescale_warning)
+            try:
+                sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
+            except (OSError, ValueError):
+                pass
         cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
                 'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search}
         cmds[args.cmd](vcd, args)

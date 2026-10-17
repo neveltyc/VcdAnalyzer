@@ -27,3 +27,7 @@ def test_parse_time_warns_when_rounding_to_ticks(capsys):
     assert 'not a whole number of timescale ticks' in capsys.readouterr().err
     assert va.parse_time('17.55us', 1e-12) == 17550000
     assert capsys.readouterr().err == ''
+    # Second non-integer tick does not re-warn or grow _warned unbounded
+    assert va.parse_time('25ps', 1e-10) == 0
+    assert capsys.readouterr().err == ''
+    assert len(va._warned) == 1

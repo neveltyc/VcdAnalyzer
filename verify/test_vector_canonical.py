@@ -30,3 +30,19 @@ def test_begin_catch_up_uses_canonical_baseline(tmp_path):
     v = va.VCDParser(str(_vcd(tmp_path)))
     # The pre-window 'b11' and in-window 'b0011' are equal: nothing at #10.
     assert [t for t, sid, _ in v.iter_events(5, None, {'!'})] == [20, 30, 40]
+
+
+def test_mismatched_real_on_vector_does_not_crash(tmp_path):
+    # Real values written to vector identifiers (e.g. 'rnan', 'r-1.5', 'rinf')
+    # must not crash with KeyError on _PAD_CHAR. Non 4-state values pass through.
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 4 ! data $end\n',
+        '#0\nb0000 !\n#1\nrnan !\n#2\nr-1.5 !\n#3\nrinf !\n#4\nb1 !\n'))
+    v = va.VCDParser(str(p))
+    events = [(t, val) for t, sid, val in v.iter_events()]
+    assert events == [(0, '0000'), (1, 'nan'), (2, '-1.5'), (3, 'inf'), (4, '0001')]
+
+    # Catch-up baseline path (--begin): pre-window mismatched reals must not crash.
+    events_t3 = [(t, val) for t, sid, val in v.iter_events(t0=3)]
+    assert events_t3 == [(3, 'inf'), (4, '0001')]
+

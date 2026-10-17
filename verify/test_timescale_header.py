@@ -36,3 +36,17 @@ def test_valid_timescale_is_silent(tmp_path):
     p.write_text('$timescale 10 ps $end\n' + BODY)
     r = run_cli(['info', p])
     assert r.returncode == 0 and r.stderr == ''
+
+
+def test_consecutive_files_without_timescale_both_warn(tmp_path, capsys):
+    import sys
+    # Both files missing timescale warn when their headers are checked
+    p1 = tmp_path / 'f1.vcd'
+    p2 = tmp_path / 'f2.vcd'
+    p1.write_text(BODY)
+    p2.write_text(BODY)
+    v1 = va.VCDParser(str(p1))
+    v2 = va.VCDParser(str(p2))
+    assert v1.timescale_warning == 'no $timescale declaration; assuming 1ps'
+    assert v2.timescale_warning == 'no $timescale declaration; assuming 1ps'
+

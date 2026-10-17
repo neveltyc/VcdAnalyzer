@@ -266,17 +266,23 @@ def _parse_timescale(text):
     default — to avoid downstream division-by-zero in parse_time and CPU
     DoS from int() on huge digit strings (Python 3.9 is O(n^2)).
     """
+    ts = _parse_timescale_strict(text)
+    return 1e-12 if ts is None else ts
+
+
+def _parse_timescale_strict(text):
+    """Like _parse_timescale, but None instead of the 1 ps fallback."""
     m = re.search(r'(\d+)\s*(fs|ps|ns|us|ms|s)', text)
     if not m:
-        return 1e-12
+        return None
     digits = m.group(1)
     # Length cap matches parse_time's MAX_TIME_ARG_LEN. The standard allows
     # only 1/10/100 (≤3 digits), so anything multi-line absurd is corruption.
     if len(digits) > MAX_TIME_ARG_LEN:
-        return 1e-12
+        return None
     n = int(digits)
     if n <= 0:
-        return 1e-12
+        return None
     return n * _UNITS[m.group(2)]
 
 
@@ -844,11 +850,19 @@ class VCDParser:
             if rec is not None:
                 append_raw(rec)
 
+        ts_valid = None   # None: no $timescale seen; False: unparseable body
+        first_line = True
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             while not done:
                 line = f.readline(MAX_DATA_TOKEN_LEN + 1)
                 if not line:
                     break
+                if first_line:
+                    # A UTF-8 byte-order mark glued to the first keyword hid
+                    # it ('\ufeff$timescale'), silently falling back to 1 ps.
+                    first_line = False
+                    if line.startswith('\ufeff'):
+                        line = line[1:]
                 if len(line) == MAX_DATA_TOKEN_LEN + 1 and not line[-1].isspace():
                     tail_len = len(line.rsplit(None, 1)[-1])
                     suffix = []
@@ -903,7 +917,9 @@ class VCDParser:
                         elif single and stripped.startswith('$timescale '):
                             ts_body = ' '.join(toks[1:-1])
                             self.ts_str = '$timescale ' + ts_body + ' $end'
-                            self.ts_sec = _parse_timescale(ts_body)
+                            ts_parsed = _parse_timescale_strict(ts_body)
+                            ts_valid = ts_parsed is not None
+                            self.ts_sec = ts_parsed if ts_valid else 1e-12
                             continue
                         elif single and (stripped.startswith('$date ') or
                                          stripped.startswith('$version ') or
@@ -946,7 +962,9 @@ class VCDParser:
                         if current_kw == '$timescale':
                             ts_body = ' '.join(body)
                             self.ts_str = '$timescale ' + ts_body + ' $end'
-                            self.ts_sec = _parse_timescale(ts_body)
+                            ts_parsed = _parse_timescale_strict(ts_body)
+                            ts_valid = ts_parsed is not None
+                            self.ts_sec = ts_parsed if ts_valid else 1e-12
                         elif current_kw == '$scope' and len(body) >= 2:
                             # Cap nesting depth to defend against
                             # 1M-level $scope-without-$upscope construction.
@@ -986,6 +1004,15 @@ class VCDParser:
                         if len(body) < MAX_HEADER_BODY_TOKENS:
                             body.append(tok)
             self._data_offset = f.tell()
+
+        # Resolved here, surfaced by main() on stderr: a missing or unreadable
+        # $timescale silently scaled every reported time by the 1 ps default.
+        if ts_valid is None:
+            self.timescale_warning = 'no $timescale declaration; assuming 1ps'
+        elif not ts_valid:
+            self.timescale_warning = 'cannot parse {}; assuming 1ps'.format(self.ts_str)
+        else:
+            self.timescale_warning = None
 
         # Phase 2: detect and reassemble bit-exploded signals.
         # Bit-exploded heuristic per QuestaSim convention: each bit is a
@@ -3679,6 +3706,8 @@ def main():
 
     try:
         vcd = VCDParser(args.file)
+        if vcd.timescale_warning:
+            _warn(vcd.timescale_warning)
         cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
                 'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search}
         cmds[args.cmd](vcd, args)

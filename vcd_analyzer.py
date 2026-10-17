@@ -1168,6 +1168,14 @@ class VCDParser:
                 self._sid_kind[_sid] = 'vector'
             else:
                 self._sid_kind[_sid] = 'scalar'
+        # Declared width of every multi-bit logic signal. Writers drop redundant
+        # MSBs (IEEE 1364 Table 18-1), so 'b11' and 'b0011' are the same 4-bit
+        # value; the change stream left-extends short vector values to this
+        # width so no-op suppression, summary counts and compare see one
+        # canonical spelling instead of reporting '3 -> 3' as a change.
+        self._vec_width = {
+            _sid: _info['width'] for _sid, _info in self.signals.items()
+            if self._sid_kind[_sid] == 'vector' and _info['width'] > 1}
 
     def match(self, keywords):
         """Return set of sig_ids matching any pattern, or None for all.
@@ -1587,6 +1595,7 @@ class VCDParser:
         list_iter = self._data_token_lists()
         pushback = []
         signals = self.signals
+        vec_width = self._vec_width
         toks = ()
         ntoks = 0
         ti = 0
@@ -1736,7 +1745,10 @@ class VCDParser:
                     if sids is None or sym in sids:
                         info = signals.get(sym)
                         if info is not None:
-                            if len(val) > info['width']:
+                            w = vec_width.get(sym)
+                            if w is not None and len(val) < w:
+                                val = (val[0] if val[0] in 'xz' else '0') * (w - len(val)) + val
+                            elif len(val) > info['width']:
                                 val = _clamp_overwide_logic_value(val, info)
                             last_val[sym] = val
                     continue
@@ -1782,11 +1794,22 @@ class VCDParser:
                 # millions of events. Take the function only when the value is
                 # actually long enough to possibly need clamping; the helper
                 # remains the single source of truth for that rare case.
-                if len(val) == 1:
-                    _record(sym, val)
+                # Short vector values are left-extended to the declared width
+                # (see _vec_width) so equal values share one spelling.
+                n = len(val)
+                if n == 1:
+                    w = vec_width.get(sym)
+                    if w is None:
+                        _record(sym, val)
+                    else:
+                        _record(sym, (val if val in 'xz' else '0') * (w - 1) + val)
                 else:
                     w = info.get('width')
-                    if w is None or len(val) <= w:
+                    if w is None or n == w:
+                        _record(sym, val)
+                    elif n < w:
+                        if sym in vec_width:
+                            val = (val[0] if val[0] in 'xz' else '0') * (w - n) + val
                         _record(sym, val)
                     else:
                         _record(sym, _clamp_overwide_logic_value(val, info))

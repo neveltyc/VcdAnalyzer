@@ -3095,18 +3095,19 @@ def cmd_list(vcd, args):
                     e['raw_bits'] = info.get('raw_bits')
             entries.append(e)
     entries.sort(key=lambda e: e['path'])
+    aliases_in_file = sum(len(info['aliases']) for info in vcd.signals.values())
     shown, trunc = _clip(entries, limit)
     if args.json:
-        _json({'total': len(entries), 'shown': len(shown), 'truncated': trunc,
+        _json({'total': len(entries), 'aliases_in_file': aliases_in_file,
+               'shown': len(shown), 'truncated': trunc,
                **_trunc_hint(trunc, len(shown), len(entries), True, 'signals'),
                'signals': shown})
     else:
-        # Numerator and denominator are both counts of matched alias paths:
-        # 'entries' holds one row per alias of each MATCHED signal, so a signal
-        # with two aliases reads "Matched: 2/2", not "2/1" — and a --filter
-        # denominator counts only the filtered aliases, not every alias in the
-        # file. Matching the JSON branch's total, which is len(entries) too.
-        print('Matched: {}/{}'.format(len(entries), len(entries)))
+        # Numerator and denominator both count alias paths (one row per alias,
+        # so a signal with two aliases reads "Matched: 2/2", not "2/1"): the
+        # matched aliases out of every alias in the file. The previous
+        # matched/matched form always printed N/N and carried no information.
+        print('Matched: {}/{}'.format(len(entries), aliases_in_file))
         for e in shown:
             print('  {:<60} {:>5}  {}'.format(e['path'], e['width'], e['type']))
         if trunc:

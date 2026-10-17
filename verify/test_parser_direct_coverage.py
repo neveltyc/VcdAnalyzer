@@ -133,11 +133,9 @@ def test_iter_events_filter_fast_path_keeps_synthesized_bus_updates(tmp_path):
     v = va.VCDParser(str(p))
     sids = v.match("bus[1:0]")
     events = [(t, v.signals[sid]["path"], val) for t, sid, val in v.iter_events(0, None, sids)]
-    # The bus is not a declared signal: bits arrive independently, so each bit
-    # update emits the current assembled value (unknown bits stay 'x') until
-    # all bits are known.
+    # Bits written in one tick are assembled once at the tick boundary: no
+    # cross-bit intermediate ('x0') is emitted.
     assert events == [
-        (0, "tb.bus[1:0]", "x0"),
         (0, "tb.bus[1:0]", "10"),
         (10, "tb.bus[1:0]", "11"),
     ]
@@ -238,8 +236,8 @@ def test_iter_events_bit_bus_intra_timestamp(tmp_path):
     v = va.VCDParser(str(p))
     events = list(v.iter_events(0, None, None))
     bus = [val for _t, sid, val in events if sid.startswith('__grp__')]
-    # bit0=1 -> 'x1'; bit1=0 -> '01'; bit0=1 again (same value, coalesced)
-    assert bus == ['x1', '01']
+    # One tick assembles to '01'; the repeated bit0=1 is a no-op re-write.
+    assert bus == ['01']
     # Bit-select $var declarations are consumed by the synthesized bus, so no
     # separate standalone events exist for the raw bits (pre-1.3.20 behavior).
     assert not any(not sid.startswith('__grp__') for _t, sid, _val in events)
@@ -414,3 +412,14 @@ def test_scan_time_range_brp_operand_hash_parity(tmp_path):
         '#0\n1!\n#100\nb101 #500\n'), name='undeclared.vcd')
     v2 = va.VCDParser(str(p2))
     assert v2.scan_time_range() == (0, 500)
+
+
+def test_bit_bus_no_cross_bit_intermediates(tmp_path):
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 1 ! d [0] $end\n$var wire 1 " d [1] $end\n',
+        '#0\n0!\n0"\n#10\n1!\n1"\n#20\n0!\n1!\n0!\n'))
+    v = va.VCDParser(str(p))
+    bus = [(t, val) for t, sid, val in v.iter_events(0, None, None)]
+    # #10: both bits rise together -> one event, no '01' phantom.
+    # #20: bit0 toggles 0->1->0 inside the tick -> genuine delta steps kept.
+    assert bus == [(0, '00'), (10, '11'), (20, '10'), (20, '11'), (20, '10')]

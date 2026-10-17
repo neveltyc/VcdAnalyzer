@@ -1459,7 +1459,22 @@ class VCDParser:
             pending.append((sid, prev, val))
             last_val[sid] = val
 
+        # Synthesized bit-exploded buses are written one bit per record, so the
+        # per-record view would expose cross-bit intermediates ('xx0','x00',
+        # '000') that never existed in the design. Buffer each bus's bit writes
+        # per tick and record the assembled value once at the tick boundary; a
+        # second write to the SAME bit inside one tick is a genuine delta-cycle
+        # step, so the bus value is recorded before that bit is overwritten.
+        bus_dirty = {}     # gid -> set of bit indices written in the current tick
+
+        def _commit_buses():
+            for gid in bus_dirty:
+                _record(gid, ''.join(reversed(bit_state[gid])))
+            bus_dirty.clear()
+
         def _flush():
+            if bus_dirty:
+                _commit_buses()
             if not pending:
                 return []
             items = list(pending)
@@ -1646,9 +1661,17 @@ class VCDParser:
                 if sym in bit_map:
                     bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
                     for gid, idx in bit_map[sym]:
-                        bit_state[gid][idx] = bit_val
                         if sids is None or gid in sids:
-                            _record(gid, ''.join(reversed(bit_state[gid])))
+                            written = bus_dirty.get(gid)
+                            if written is None:
+                                bus_dirty[gid] = {idx}
+                            elif idx in written:
+                                if bit_state[gid][idx] != bit_val:
+                                    _record(gid, ''.join(reversed(bit_state[gid])))
+                                bus_dirty[gid] = {idx}
+                            else:
+                                written.add(idx)
+                        bit_state[gid][idx] = bit_val
 
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).

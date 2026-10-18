@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.5-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.6-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-231%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-249%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -65,7 +65,7 @@ python vcd_analyzer.py summary sim.vcd --filter dll_*
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.5/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.6/vcd_analyzer.py -o vcd_analyzer.py
 
 # 验证
 python vcd_analyzer.py --version
@@ -107,6 +107,16 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   逐次计数。仅仅重复断言信号当前值的记录——连续的重复值，或
   `$dumpall`/`$dumpon` 检查点重发当前值——属于 no-op，不产生变化事件
   （`summary` 的 static/active 统计保持精确）。
+- **位拆分总线每个时刻只变化一次。** 重组总线的多个位在同一时间戳变化时，
+  `dump`、`summary` 和 `changed()` 只看到一次组装后的值，不会出现跨位的中间值；
+  同一位在一个时刻内被写两次仍视为 delta-cycle 变化并保留。
+- **向量值按完整位宽比较。** 4 位信号上的 `b11` 与 `b0011` 是同一个值
+  （IEEE 1364 左扩展规则），换一种写法不算变化。
+- **`summary` 与 `changed()` 计数一致。** 信号的首次出现不算变化：窗口内首次
+  出现的信号以该值作为 `init`，并给出 `defined_at`。event 变量每次触发都计数。
+- **时间是精确的。** 文本输出保留每一位 tick（`17.534712ms`）；时间参数不是
+  tick 的整数倍时会四舍五入并在 stderr 给出警告。缺少或无法解析 `$timescale`
+  时按 1ps 处理，并在 stderr 警告。
 - **`search` 的条件是 AND 子句，重复 `--condition` 即 OR。** 一个 `--condition`
   是逗号分隔的 AND 项列表，每项是 `SIG=VAL`、`SIG!=VAL` 或 `changed(SIG)`。
   重复该标志后，任一子句成立的时刻即成立（OR-of-ANDs）——每个通道写一个子句，
@@ -168,6 +178,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.5.6` | 位拆分总线每个时刻只变化一次，任意起始位的连续位段可重组；时间输出与解析精确；向量按完整位宽比较；`summary` 计数与 `changed()` 一致；BOM 与 `$timescale` 警告 |
 | `1.5.5` | 修正过滤列表计数和搜索 OR 事件；拒绝空波形及非法时间/过滤参数；限制 token 长度、避免 glob 回溯，无限量结果改用临时文件 |
 | `1.5.4` | `search` 目标值支持不关心位:二进制字面量中的 `?` 匹配任意位值,同 Verilog `casez`(`status=b?????1??` 检查 8 位总线的第 2 位),无需 dump 整条总线即可按单个位或位段搜索 |
 | `1.5.3` | `search` 支持负数目标值:负实数可匹配 real 信号(`dac=-1.5`),逻辑信号上的负十进制数按声明位宽的二进制补码匹配(`cnt=-1`、`sbyte=-5`;VCD 不记录有无符号);4 态目标值可带多余前导零;非 ASCII 数字目标值改为正常报错而非抛出 traceback |

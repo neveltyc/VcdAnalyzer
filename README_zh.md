@@ -10,7 +10,7 @@
   <img alt="Version" src="https://img.shields.io/badge/版本-1.5.6-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-247%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-249%20passed-22aa55?style=flat-square">
 </p>
 
 ---

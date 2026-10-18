@@ -88,7 +88,7 @@ Key JSON fields: `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h
 python3 vcd_analyzer.py --json list <file> [--filter K1,K2]
 ```
 
-Key JSON fields: `signals[].path`, `signals[].width`, `signals[].type`.
+Key JSON fields: `signals[].path`, `signals[].width`, `signals[].type`, `total`, `aliases_total`.
 
 Signal paths use dot-separated scope hierarchy: `tb.u_cpu.u_alu.result[31:0]`.
 

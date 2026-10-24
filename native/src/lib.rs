@@ -252,16 +252,20 @@ enum Class {
 
 fn classify(b: &[u8]) -> Result<Class, String> {
     let first = b[0];
-    // Python's int() and the _REAL_RE regex accept non-ASCII digits and
-    // whitespace; this builder is deliberately ASCII-only. Rather than
-    // silently disagreeing with the reference parser on such tokens, any
-    // grammar-position token ('#', b, r, p openers) carrying a non-ASCII
-    // byte aborts the build — the caller falls back to the pure-Python
-    // builder, which shares the parser's exact semantics.
-    if matches!(first, b'#' | b'b' | b'B' | b'r' | b'R' | b'p')
+    // Python's int() and the _REAL_RE regex accept non-ASCII digits; this
+    // builder is ASCII-only. Refusal is needed ONLY where a divergence is
+    // possible: '#' (int() takes Unicode digits) and r/R (\d in the real
+    // regex). b/B values must NOT be scanned — they can be 512+ bytes and
+    // a non-ASCII byte there takes the IDENTICAL invalid-4-state drop path
+    // in both implementations (is_4state_bits vs _DEL_4STATE_CI), so there
+    // is no divergence to refuse; scanning them cost ~0.6 s on a 10 GiB
+    // bus-heavy dump (review round 3, perf follow-up). Scalar and p tokens
+    // are likewise parity-safe without a scan (byte-exact identifier
+    // lookup; fixed ASCII state/level sets on both sides).
+    if matches!(first, b'#' | b'r' | b'R')
         && b.iter().any(|&c| c >= 0x80)
     {
-        die!("non-ASCII byte in a grammar token; use the pure-Python builder");
+        die!("non-ASCII byte in a numeric grammar token; use the pure-Python builder");
     }
     if first == b'$' {
         return Ok(if is_known_marker(b) { Class::MarkerKnown } else { Class::SectionOpen });

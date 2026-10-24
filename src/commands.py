@@ -5,18 +5,38 @@
 def cmd_index(vcd, args):
     """Build the optional .vcidx sidecar for fast random access.
 
-    Explicit by design: queries never write. The fast distribution
-    variant builds via its embedded native library; the standard file
-    uses the pure-Python pass (identical sidecar semantics, slower).
+    Explicit by design for interactive use: queries never write (the
+    background auto-builder is the one exception, gated by its own lock).
+    --output stores the sidecar at PATH and links <file>.vcidx to it so
+    queries still find it; a failed link is reported, never fatal. The
+    fast distribution variant builds via its embedded native library; the
+    standard file uses the pure-Python pass (identical sidecar semantics).
     """
     sidecar = sidecar_path(args.file)
-    if os.path.exists(sidecar) and not args.force:
-        sys.exit('Error: {} already exists; use --force to rebuild'.format(sidecar))
-    block_bytes = args.block_mib << 20
+    target = os.path.abspath(args.output) if args.output else sidecar
+    auto = bool(getattr(args, 'auto', False))
+    lock = sidecar + '.lock'  # created by the spawner in --auto mode
     try:
-        stats = build_index_best(args.file, sidecar, block_bytes)
-    except (ValueError, _VCDResourceError) as error:
-        sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+        if os.path.exists(target) and not (args.force or auto):
+            sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
+        block_bytes = args.block_mib << 20
+        try:
+            stats = build_index_best(args.file, target, block_bytes)
+        except (ValueError, _VCDResourceError) as error:
+            try:
+                if os.path.exists(target):
+                    os.unlink(target)  # never leave a partial sidecar behind
+            except OSError:
+                pass
+            sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+        if args.output:
+            _link_sidecar(sidecar, target)
+    finally:
+        if auto:
+            try:
+                os.unlink(lock)
+            except OSError:
+                pass
     builder = stats.get('builder', 'python')
     r = {'file': args.file, 'sidecar': sidecar,
          'builder': builder,
@@ -29,10 +49,9 @@ def cmd_index(vcd, args):
          'raw_symbols': stats.get('raw_symbols'),
          'signal_block_pairs': stats.get('signal_block_pairs')}
     if args.json:
-        r['builder'] = builder
         _json(r)
         return
-    print('Built    : {}'.format(r['sidecar']))
+    print('Built    : {}'.format(target))
     print('Builder  : {}'.format(builder))
     print('Source   : {:,} bytes'.format(r['source_bytes']))
     print('Index    : {:,} bytes ({:.4f}%)'.format(r['index_bytes'], r['index_pct']))

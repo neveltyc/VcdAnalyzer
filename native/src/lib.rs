@@ -131,6 +131,7 @@ struct Tokenizer {
     fill: usize,
     pos: usize,
     base: u64, // absolute offset of buf[0]
+    end: u64,  // absolute offset one past the last byte of THIS range
     eof: bool,
     spill: Vec<u8>,     // token bytes carried across a refill
     spill_off: u64,
@@ -139,10 +140,10 @@ struct Tokenizer {
 }
 
 impl Tokenizer {
-    fn new(mut file: File, start: u64, max_token_len: usize) -> Result<Tokenizer, String> {
+    fn new(mut file: File, start: u64, end: u64, max_token_len: usize) -> Result<Tokenizer, String> {
         file.seek(SeekFrom::Start(start)).map_err(|e| format!("seek to data start: {}", e))?;
         Ok(Tokenizer {
-            file, buf: vec![0; READ_CHUNK], fill: 0, pos: 0, base: start,
+            file, buf: vec![0; READ_CHUNK], fill: 0, pos: 0, base: start, end,
             eof: false, spill: Vec::new(), spill_off: 0, assembled: Vec::new(),
             max_token_len,
         })
@@ -151,7 +152,10 @@ impl Tokenizer {
     fn refill(&mut self) -> Result<(), String> {
         self.base += self.fill as u64;
         self.pos = 0;
-        match self.file.read(&mut self.buf) {
+        // Never read past the range end: a worker stops exactly at its
+        // split point so the next worker owns the bytes beyond it.
+        let cap = ((self.end - self.base) as usize).min(self.buf.len());
+        match self.file.read(&mut self.buf[..cap]) {
             // fill MUST be cleared on EOF: a stale fill would re-tokenize
             // the old buffer contents under an advanced base.
             Ok(0) => { self.eof = true; self.fill = 0; }
@@ -378,6 +382,7 @@ struct Builder {
     postings: Vec<Vec<(u32, u32)>>,
     block_bytes: u64,
     max_block_bytes: u64,
+    first_time: Option<u64>,
 }
 
 impl Builder {
@@ -443,6 +448,13 @@ impl Builder {
         Ok(())
     }
 
+    fn note_time(&mut self, t: u64) {
+        if self.first_time.is_none() {
+            self.first_time = Some(t);
+        }
+        self.current = t;
+    }
+
     fn run(&mut self, end_of_data: u64) -> Result<(), String> {
         let debug = std::env::var("VCDIDX_DEBUG").is_ok();
         loop {
@@ -470,7 +482,7 @@ impl Builder {
             if tv < self.current {
                 die!("non-monotonic timestamps: index requires fallback");
             }
-            self.current = tv;
+            self.note_time(tv);
         }
         Ok(())
     }
@@ -483,7 +495,7 @@ impl Builder {
                 if v < self.current {
                     die!("non-monotonic timestamps: index requires fallback");
                 }
-                self.current = v;
+                self.note_time(v);
             }
             Class::TimeBad | Class::Other => {}
             Class::ScalarVal => {
@@ -606,32 +618,134 @@ pub fn build_from_manifest(
         }
     }
 
-    let file = File::open(vcd_path).map_err(|e| format!("open: {}", e))?;
-    let meta = file.metadata().map_err(|e| format!("stat: {}", e))?;
+    let meta = File::open(vcd_path).and_then(|f| f.metadata())
+        .map_err(|e| format!("stat: {}", e))?;
     let size0 = meta.len();
     let mtime0 = meta.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
 
-    let symtab = SymTab::new(&symbols);
-    let mut builder = Builder {
-        tok: Tokenizer::new(file, data_start, max_token_len)?,
-        symtab,
-        pending: VecDeque::new(),
-        current: 0,
-        block_start: data_start,
-        block_initial: 0,
-        blocks: Vec::new(),
-        recent_pos: vec![u64::MAX; symbols.len()],
-        touched: Vec::new(),
-        postings: vec![Vec::new(); symbols.len()],
-        block_bytes,
-        max_block_bytes: 0,
-    };
-    builder.run(size0)?;
+    // -- thread plan --------------------------------------------------------
+    // The scan is single-threaded by default on small files; on big ones the
+    // data section is split at TIMESTAMP boundaries and parsed by up to
+    // VCD_ANALYZER_INDEX_THREADS workers (default: min(4, cores)). A '#T'
+    // split point is always equivalent to the sequential scan: the token
+    // before it either completes a record (workers agree) or is an opener
+    // whose operand is that '#T' — structurally consumed and dropped in
+    // BOTH executions, with the '#T' then read as a timestamp. Per-block
+    // postings depend only on the bytes inside the block, so merged results
+    // are identical up to block-grid placement (queries don't care).
+    let threads_env = std::env::var("VCD_ANALYZER_INDEX_THREADS").ok()
+        .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let threads = if threads_env == 0 { cores.min(4) } else { threads_env.min(16) };
+    let parallel_min = std::env::var("VCD_ANALYZER_INDEX_PARALLEL_MIN").ok()
+        .and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(64 << 20);
 
-    let meta1 = builder.tok.file.metadata().map_err(|e| format!("stat: {}", e))?;
+    let mut splits: Vec<u64> = vec![data_start];
+    if threads > 1 && size0.saturating_sub(data_start) >= parallel_min {
+        for i in 1..threads {
+            let nominal = data_start + (size0 - data_start) * (i as u64) / threads as u64;
+            let last = *splits.last().unwrap();
+            if nominal <= last + (16 << 20) || nominal + (16 << 20) >= size0 {
+                continue; // keep chunks meaty; fewer workers is fine
+            }
+            match find_timestamp_split(vcd_path, nominal, size0)? {
+                Some(off) if off > last + (16 << 20) && off + (16 << 20) < size0 => splits.push(off),
+                _ => {}
+            }
+        }
+    }
+    splits.push(size0);
+
+    struct WorkerOut {
+        blocks: Vec<(u64, u64, u64, u64)>,
+        postings: Vec<Vec<(u32, u32)>>,
+        first_time: Option<u64>,
+        last_time: u64,
+        max_block_bytes: u64,
+    }
+
+    let parse = |start: u64, end: u64| -> Result<WorkerOut, String> {
+        let file = File::open(vcd_path).map_err(|e| format!("open: {}", e))?;
+        let mut b = Builder {
+            tok: Tokenizer::new(file, start, end, max_token_len)?,
+            symtab: SymTab::new(&symbols),
+            pending: VecDeque::new(),
+            current: 0,
+            block_start: start,
+            block_initial: 0,
+            blocks: Vec::new(),
+            recent_pos: vec![u64::MAX; symbols.len()],
+            touched: Vec::new(),
+            postings: vec![Vec::new(); symbols.len()],
+            block_bytes,
+            max_block_bytes: 0,
+            first_time: None,
+        };
+        b.run(end)?;
+        Ok(WorkerOut {
+            first_time: b.first_time,
+            blocks: b.blocks,
+            postings: b.postings,
+            last_time: b.current,
+            max_block_bytes: b.max_block_bytes,
+        })
+    };
+
+    let mut workers: Vec<WorkerOut> = Vec::with_capacity(splits.len() - 1);
+    if splits.len() == 2 {
+        workers.push(parse(data_start, size0)?);
+    } else {
+        let ranges: Vec<(u64, u64)> = splits.windows(2).map(|w| (w[0], w[1])).collect();
+        let outs: Vec<Result<WorkerOut, String>> = Vec::new();
+        let mut outs = outs;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = ranges.iter().map(|&(s, e)| {
+                scope.spawn(move || parse(s, e))
+            }).collect();
+            for h in handles {
+                outs.push(h.join().unwrap_or_else(|_| Err("worker panicked".to_string())));
+            }
+        });
+        workers = outs.into_iter().collect::<Result<Vec<_>, String>>()?;
+    }
+
+    // -- merge ---------------------------------------------------------------
+    let mut blocks: Vec<(u64, u64, u64, u64)> = Vec::new();
+    let mut postings: Vec<Vec<(u32, u32)>> = vec![Vec::new(); symbols.len()];
+    let mut max_block_bytes: u64 = 0;
+    let mut carried_time: u64 = 0; // time established before the current worker
+    for w in workers {
+        if let Some(ft) = w.first_time {
+            if ft < carried_time {
+                die!("non-monotonic timestamps: index requires fallback");
+            }
+        }
+        // The worker's first block opens at its range start; the time in
+        // effect there is whatever the previous workers established. Later
+        // blocks inherit the previous block's t1, as in the sequential scan.
+        for (bi, &(s, e, _t0, t1)) in w.blocks.iter().enumerate() {
+            let t0 = if bi == 0 { carried_time } else { w.blocks[bi - 1].3 };
+            blocks.push((s, e, t0, t1));
+        }
+        let base_bid = (blocks.len() - w.blocks.len()) as u32;
+        for (sym, plist) in w.postings.into_iter().enumerate() {
+            let target = &mut postings[sym];
+            target.reserve(plist.len());
+            for (bid, off) in plist {
+                target.push((bid + base_bid, off));
+            }
+        }
+        max_block_bytes = max_block_bytes.max(w.max_block_bytes);
+        if !w.blocks.is_empty() {
+            carried_time = w.last_time;
+        }
+    }
+
+    let meta1 = File::open(vcd_path).and_then(|f| f.metadata())
+        .map_err(|e| format!("stat: {}", e))?;
     let mtime1 = meta1.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as u64)
@@ -640,11 +754,11 @@ pub fn build_from_manifest(
         die!("source changed while building index");
     }
 
-    let nblocks = builder.blocks.len();
+    let nblocks = blocks.len();
     let narrow = nblocks <= 65535;
     let mode: u32 = if narrow { 2 } else { 0 };
     let entry_bytes: u64 = if narrow { 6 } else { 8 };
-    let pairs: u64 = builder.postings.iter().map(|p| p.len() as u64).sum();
+    let pairs: u64 = postings.iter().map(|p| p.len() as u64).sum();
     // header ('8s' magic + 6 u64) = 56; BLOCK = 32; DIRECTORY = 16
     let directory_bytes = 56 + 32 * nblocks as u64 + 16 * symbols.len() as u64;
 
@@ -658,20 +772,20 @@ pub fn build_from_manifest(
     put_u64(&mut w, nblocks as u64);
     put_u64(&mut w, symbols.len() as u64);
     put_u64(&mut w, data_start);
-    for &(s, e, t0, t1) in &builder.blocks {
+    for &(s, e, t0, t1) in &blocks {
         put_u64(&mut w, s);
         put_u64(&mut w, e);
         put_u64(&mut w, t0);
         put_u64(&mut w, t1);
     }
     let mut location = directory_bytes;
-    for p in &builder.postings {
+    for p in &postings {
         put_u64(&mut w, location);
         put_u32(&mut w, p.len() as u32);
         put_u32(&mut w, mode);
         location += p.len() as u64 * entry_bytes;
     }
-    for p in &builder.postings {
+    for p in &postings {
         for &(bid, rel) in p {
             if narrow {
                 put_u16(&mut w, bid as u16);
@@ -689,7 +803,7 @@ pub fn build_from_manifest(
     Ok(format!(
         "{{\"build_s\":{:.4},\"source_bytes\":{},\"index_bytes\":{},\"blocks\":{},\"raw_symbols\":{},\"signal_block_pairs\":{},\"max_block_bytes\":{},\"posting_mode\":{}}}",
         started.elapsed().as_secs_f64(), size0, index_bytes, nblocks,
-        symbols.len(), pairs, builder.max_block_bytes, mode
+        symbols.len(), pairs, max_block_bytes, mode
     ))
 }
 
@@ -748,4 +862,57 @@ pub extern "C" fn vcdidx_abi_build(
         Ok(stats) => { write_cstr(stats_out, stats_len, &stats); 0 }
         Err(e) => { write_cstr(err_out, err_len, &e); 2 }
     }
+}
+
+// -- parallel split points --------------------------------------------------
+
+/// First '#<digits>' token boundary at or after `nominal`. Splitting at a
+/// timestamp token is always equivalent to the sequential scan (see the
+/// thread-plan comment in build_from_manifest). None when no timestamp is
+/// found within a growing window (caller falls back to fewer workers).
+fn find_timestamp_split(vcd_path: &str, nominal: u64, file_end: u64) -> Result<Option<u64>, String> {
+    let mut f = File::open(vcd_path).map_err(|e| format!("open: {}", e))?;
+    let mut window: usize = 256 << 10;
+    while window <= (32 << 20) {
+        if nominal >= file_end {
+            return Ok(None);
+        }
+        let cap = (window as u64).min(file_end - nominal) as usize;
+        let mut buf = vec![0u8; cap];
+        f.seek(SeekFrom::Start(nominal)).map_err(|e| format!("seek: {}", e))?;
+        let mut got = 0usize;
+        while got < cap {
+            match f.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) => die!("read: {}", e),
+            }
+        }
+        if got == 0 {
+            return Ok(None);
+        }
+        buf.truncate(got);
+        let mut i = 0usize;
+        // the first token may be partial (nominal can land mid-token): skip it
+        let mut skipped = false;
+        while i < got {
+            if is_ws(buf[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < got && !is_ws(buf[i]) {
+                i += 1;
+            }
+            if !skipped {
+                skipped = true; // partial first token, not trustworthy
+                continue;
+            }
+            if buf[start] == b'#' && i - start > 1 && buf[start + 1].is_ascii_digit() {
+                return Ok(Some(nominal + start as u64));
+            }
+        }
+        window *= 2;
+    }
+    Ok(None)
 }

@@ -760,3 +760,175 @@ def try_index(vcd_path):
         idx.close()
         return None
     return idx
+
+
+# -- index building: paths, auto-build, locking ------------------------------
+
+_AUTO_SCRIPT_PATH = None  # set by main(): the running single-file script
+
+
+def _sidecar_fresh(vcd_path, sidecar):
+    """True when the sidecar header still matches the source file."""
+    try:
+        with open(sidecar, 'rb') as f:
+            head = f.read(24)
+        if len(head) < 24:
+            return False
+        magic, size, mtime = struct.unpack_from('<8sQQ', head, 0)
+        stat = os.stat(vcd_path)
+        return (magic in (MAGIC, MAGIC2)
+                and size == stat.st_size and mtime == stat.st_mtime_ns)
+    except (OSError, struct.error):
+        return False
+
+
+def _writer_holds(vcd_path):
+    """Why the VCD looks still-open-for-write, or None.
+
+    Portable signal first: a dump modified seconds ago is almost certainly
+    a live simulator output (they append continuously). Then lsof where
+    available; on Windows, an open-for-write usually fails under another
+    writer's share mode.
+    """
+    try:
+        age = time.time() - os.stat(vcd_path).st_mtime
+    except OSError:
+        return None
+    if age < 5.0:
+        return 'modified {:.1f}s ago (still being written?)'.format(age)
+    if sys.platform != 'win32':
+        try:
+            out = subprocess.run(['lsof', '-w', '--', vcd_path],
+                                 capture_output=True, text=True, timeout=15)
+            if out.returncode == 0 and out.stdout.strip():
+                return 'open by another process (lsof)'
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            fd = os.open(vcd_path, os.O_WRONLY)
+            os.close(fd)
+        except OSError:
+            return 'locked by another process'
+    return None
+
+
+def _lock_stale(lock, max_age=3600.0):
+    """True when the build lock's owner is gone (dead pid / ancient)."""
+    try:
+        with open(lock) as f:
+            pid = int(f.read().strip() or 0)
+        if pid and pid != os.getpid():
+            if sys.platform != 'win32':
+                try:
+                    os.kill(pid, 0)
+                    return False  # alive and building
+                except ProcessLookupError:
+                    return True
+                except PermissionError:
+                    return False  # alive (owned by another user)
+        age = time.time() - os.stat(lock).st_mtime
+        return age > max_age
+    except (OSError, ValueError):
+        return True
+
+
+def _acquire_build_lock(sidecar):
+    lock = sidecar + '.lock'
+    for _attempt in (0, 1):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as f:
+                f.write(str(os.getpid()))
+            return lock
+        except FileExistsError:
+            if _attempt == 0 and _lock_stale(lock):
+                try:
+                    os.unlink(lock)
+                    continue
+                except OSError:
+                    pass
+            return None
+        except OSError:
+            return None  # unwritable directory: cannot lock, cannot build
+    return None
+
+
+def maybe_auto_build(parser, vcd_path):
+    """Spawn ONE detached background index build when worthwhile.
+
+    Triggered from a normal query when no sidecar exists, or an existing
+    one is stale (source changed). A per-file O_EXCL lock guarantees a
+    single builder at a time; VCD_ANALYZER_AUTO_INDEX=0 disables; a source
+    that looks still-open-for-write (fresh mtime / lsof holder / Windows
+    lock) is reported and left alone. Never blocks or fails the query.
+    """
+    if os.environ.get('VCD_ANALYZER_AUTO_INDEX', '1').lower() in ('0', 'false', 'no'):
+        return
+    if _AUTO_SCRIPT_PATH is None:
+        return  # imported as a library: no script to respawn
+    vcd_path = os.path.abspath(vcd_path)
+    sidecar = sidecar_path(vcd_path)
+    if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
+        return
+    try:
+        symbols = raw_symbols(parser)
+        data = os.path.getsize(vcd_path) - data_start(vcd_path)
+    except (OSError, _VCDResourceError):
+        return
+    if not (data >= 128 << 10 and data >= 64 * len(symbols)):
+        return  # the gate would refuse it; do not build what we won't use
+    held = _writer_holds(vcd_path)
+    if held:
+        _warn('{}: index not rebuilt automatically — source {} '
+              '(rerun after the dump completes)'.format(vcd_path, held),
+              cat='index_writer_holds')
+        return
+    lock = _acquire_build_lock(sidecar)
+    if lock is None:
+        return  # another builder owns it, or the directory is unwritable
+    log = None
+    try:
+        try:
+            log = open(sidecar + '.log', 'a')
+        except OSError:
+            log = None
+        subprocess.Popen(
+            [sys.executable, _AUTO_SCRIPT_PATH, 'index', vcd_path, '--auto'],
+            stdout=log if log is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if log is not None else subprocess.DEVNULL,
+            start_new_session=True, close_fds=True)
+        _warn('{}: building index in the background '
+              '(VCD_ANALYZER_AUTO_INDEX=0 disables)'.format(vcd_path),
+              cat='index_autobuild')
+    except OSError as error:
+        _warn('{}: background index build failed to start: {}'.format(
+            vcd_path, error), cat='index_autobuild')
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+    finally:
+        if log is not None:
+            log.close()
+
+
+def _link_sidecar(sidecar, target):
+    """Point <file>.vcidx at a custom --output location.
+
+    Replaces a previous link; a pre-existing REGULAR file at the sidecar
+    path is left untouched (never delete a file the user put there) and
+    reported. A failed link is a warning, not an error: the sidecar at
+    PATH is still valid, queries just will not find it automatically.
+    """
+    try:
+        if os.path.islink(sidecar):
+            os.unlink(sidecar)
+        elif os.path.exists(sidecar):
+            _warn('{}: occupied by a regular file; left in place '
+                  '(index written to {})'.format(sidecar, target), cat='index_link')
+            return
+        os.symlink(target, sidecar)
+    except OSError as error:
+        _warn('index written to {} but queries look for {} '
+              '(link failed: {})'.format(target, sidecar, error), cat='index_link')

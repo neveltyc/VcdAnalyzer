@@ -29,6 +29,8 @@ def _add_common(sp):
 
 
 def main():
+    global _AUTO_SCRIPT_PATH
+    _AUTO_SCRIPT_PATH = os.path.abspath(sys.argv[0])
     p = argparse.ArgumentParser(
         prog='vcd_analyzer',
         description=__doc__,
@@ -48,6 +50,9 @@ def main():
                     help='index block size in MiB (default 8)')
     sp.add_argument('--force', action='store_true',
                     help='rebuild even if the sidecar already exists')
+    sp.add_argument('--output', metavar='PATH', default=None,
+                    help='write the sidecar at PATH and link <file>.vcidx to it')
+    sp.add_argument('--auto', action='store_true', help=argparse.SUPPRESS)
     _add_common(sp)
 
     sp = sub.add_parser('info', help='file overview: timescale, signal count, time span, scopes')
@@ -103,6 +108,8 @@ def main():
         # The index only accelerates reads; a missing/stale/rejected
         # sidecar silently keeps the plain parser (one warning at most).
         vcd = try_index(args.file) or VCDParser(args.file)
+        if args.cmd != 'index':
+            maybe_auto_build(vcd, args.file)
         try:
             if vcd.timescale_warning:
                 try:

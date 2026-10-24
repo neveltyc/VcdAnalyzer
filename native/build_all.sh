@@ -21,7 +21,7 @@ cp target/aarch64-apple-darwin/release/libvcdidx.dylib     dist/aarch64-macos.dy
 # sanity: the ABI entry points must be present in each artifact
 for f in dist/*; do
   if nm -D "$f" 2>/dev/null | grep -q vcdidx_abi_build || nm "$f" 2>/dev/null | grep -q vcdidx_abi_build || strings "$f" | grep -q vcdidx_abi_build; then
-    echo "ok  $f ($(stat -f %z "$f") bytes)"
+    echo "ok  $f ($(stat -f %z "$f" 2>/dev/null || stat -c %s "$f") bytes)"
   else
     echo "MISSING ABI SYMBOL in $f"; exit 1
   fi

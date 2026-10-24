@@ -73,7 +73,7 @@ TAIL_PARTS = [
 MODULE_ORDER = SHARED_PARTS + ['index_stub.py'] + TAIL_PARTS
 
 # Fast variant: the real index engine replaces the stub; the generated
-# native part is inserted just before cli.py by assemble_fast().
+# native part is inserted just before cli.py by assemble_full().
 FAST_MODULE_ORDER = SHARED_PARTS + ['index.py'] + TAIL_PARTS
 
 _TOP_LEVEL_IMPORT = re.compile(r'^(?:import|from)\s', re.MULTILINE)
@@ -219,10 +219,23 @@ def _load_native_library():
                 if raw is None:
                     return None
                 os.makedirs(cache_dir, exist_ok=True)
-                tmp = target + '.tmp.{}'.format(os.getpid())
-                with open(tmp, 'wb') as out:
-                    out.write(raw)
-                os.replace(tmp, target)
+                fd, tmp = tempfile.mkstemp(dir=cache_dir, suffix='.part')
+                try:
+                    with os.fdopen(fd, 'wb') as out:
+                        out.write(raw)
+                    os.replace(tmp, target)
+                except BaseException:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            else:
+                # Re-verify a pre-existing cache file before loading it:
+                # the extraction path checks, the cached path must too.
+                with open(target, 'rb') as f:
+                    if hashlib.sha256(f.read()).hexdigest() != info['sha256']:
+                        return None
             lib = ctypes.CDLL(target)
         if lib.vcdidx_abi_version() != _NATIVE_ABI_VERSION:
             return None

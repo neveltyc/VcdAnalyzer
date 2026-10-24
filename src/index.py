@@ -12,7 +12,6 @@
 # Python build pass below; queries are identical either way. Disable with
 # VCD_ANALYZER_NO_INDEX=1 (never use).
 
-HEADER = struct.Struct('<8sQQQQQQ')
 BLOCK = struct.Struct('<QQqq')
 DIRECTORY = struct.Struct('<QII')
 POSTING = struct.Struct('<II')
@@ -126,10 +125,15 @@ def items(parser, fd, start, end, initial_time=0, counters=None, chunk_size=1 <<
             continue
         if c0 == '#' and len(token) > 1 and token[1].isdigit():
             value = _parse_vcd_timestamp_token(token)
-            if value is not None:
-                if value < current:
-                    raise ValueError('non-monotonic timestamps: index requires fallback')
-                current = value
+            if value is None:
+                # Tolerated malformed timestamp (e.g. '#1.5'): the reference
+                # parser skips it entirely, so it must not act as a commit
+                # point for pending bus writes either (review P1-2).
+                yield token.offset, before, 'marker', current, None, None
+                continue
+            if value < current:
+                raise ValueError('non-monotonic timestamps: index requires fallback')
+            current = value
             yield token.offset, before, 'time', current, None, None
             continue
         if c0 in '01xXzZ' and len(token) > 1:
@@ -281,7 +285,11 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
     pairs = sum(sum(values[i+1]-values[i] for i in range(0,len(values),2))
                 if modes[sid] else len(values) for sid,values in enumerate(memberships))
     posting_start = HEADER.size + BLOCK.size * len(blocks) + DIRECTORY.size * len(symbols)
-    with open(sidecar, 'wb') as out:
+    # Atomic publication: concurrent readers must never see a half-written
+    # sidecar whose fresh-claiming header already matches (review P0-2).
+    sidecar_tmp = str(sidecar) + '.tmp.{}'.format(os.getpid())
+    out = open(sidecar_tmp, 'wb')
+    try:
         out.write(HEADER.pack(MAGIC, stat_after.st_size, stat_after.st_mtime_ns,
                               block_bytes, len(blocks), len(symbols), start))
         for block in blocks:
@@ -299,6 +307,9 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
                 if len(buf) >= 1 << 20:
                     out.write(buf); buf.clear()
             out.write(buf)
+    finally:
+        out.close()
+    os.replace(sidecar_tmp, sidecar)
     # Compare encodings WITHOUT pretending they are actual measured sidecars.
     membership_delta_bytes = 0
     membership_bitset_bytes = 0
@@ -335,12 +346,29 @@ class IndexedVCD(VCDParser):
     def __init__(self, path, sidecar, enforce_gate=True):
         super().__init__(str(path))
         self._enforce_gate = enforce_gate
+        # Freshness first, handles second: a stale sidecar must not leak the
+        # source fd (a leaked fd makes lsof report OURSELVES as the writer,
+        # permanently blocking auto-rebuild — review P1-1).
+        _st = os.stat(path)
+        with open(sidecar, 'rb') as _probe:
+            _head = _probe.read(24)
+        if len(_head) < 24:
+            raise ValueError('truncated index')
+        _magic, _size, _mtime = struct.unpack_from('<8sQQ', _head, 0)
+        if (_magic not in (MAGIC, MAGIC2) or _size != _st.st_size
+                or _mtime != _st.st_mtime_ns):
+            raise ValueError('stale index')
         self.fd = os.open(path, os.O_RDONLY)
-        self.index_file = open(sidecar, 'rb')
-        self.mapping = mmap.mmap(self.index_file.fileno(), 0, access=mmap.ACCESS_READ)
-        magic, size, mtime, self.block_bytes, nb, ns, self.begin_offset = HEADER.unpack_from(self.mapping)
+        try:
+            self.index_file = open(sidecar, 'rb')
+            self.mapping = mmap.mmap(self.index_file.fileno(), 0, access=mmap.ACCESS_READ)
+            magic, size, mtime, self.block_bytes, nb, ns, self.begin_offset = HEADER.unpack_from(self.mapping)
+        except Exception:
+            self.close()
+            raise
         stat = os.fstat(self.fd)
         if magic not in (MAGIC, MAGIC2) or size != stat.st_size or mtime != stat.st_mtime_ns:
+            self.close()
             raise ValueError('stale index')
         self.file_size = size
         self.symbols = raw_symbols(self)
@@ -354,20 +382,17 @@ class IndexedVCD(VCDParser):
         for sym, refs in self._bit_map.items():
             for gid, _bit in refs:
                 self.sources.setdefault(gid, set()).add(sym)
-        # Direct scope membership, not duplicated descendant sets.
-        self.scope_direct = defaultdict(set)
-        self.scope_children = defaultdict(set)
-        for sid, info in self.signals.items():
-            for scope in info.get('scopes', []):
-                self.scope_direct[scope].add(sid)
-                parts = scope.split('.')
-                for depth in range(1, len(parts)+1):
-                    parent = '.'.join(parts[:depth-1])
-                    self.scope_children[parent].add('.'.join(parts[:depth]))
         self.reset_counters()
         self._advisable = None
     def close(self):
-        self.mapping.close(); self.index_file.close(); os.close(self.fd)
+        for name, closer in (('mapping', lambda: self.mapping.close()),
+                             ('index_file', lambda: self.index_file.close())):
+            attr = self.__dict__.get(name)
+            if attr is not None:
+                closer()
+        fd = self.__dict__.get('fd')
+        if fd is not None:
+            os.close(fd)
     def reset_counters(self):
         self.counters = {'bytes': 0, 'reads': 0, 'blocks': 0, 'point_records': 0,
                          'point_reads': 0}
@@ -393,13 +418,6 @@ class IndexedVCD(VCDParser):
         return self._advisable
     def _gate_rejects(self):
         return self._enforce_gate and not self.index_advisable()
-    def hier(self, scope):
-        found = set(); pending = [scope]
-        while pending:
-            node = pending.pop()
-            found.update(self.scope_direct.get(node, ()))
-            pending.extend(self.scope_children.get(node, ()))
-        return found
     def selected_raw(self, sids):
         result = set()
         for sid in self.signals if sids is None else sids:
@@ -710,10 +728,6 @@ def sidecar_path(vcd_path):
     return str(vcd_path) + '.vcidx'
 
 
-def sidecar_path(vcd_path):
-    return str(vcd_path) + '.vcidx'
-
-
 def native_index_build(path, sidecar, block_bytes):
     """Build via the embedded native library (full variant only).
 
@@ -758,7 +772,8 @@ def try_index(vcd_path):
         return None
     try:
         idx = IndexedVCD(vcd_path, sidecar)
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, struct.error, KeyError) as error:
+        # struct.error/KeyError: truncated or corrupt sidecar (review P0-2)
         _warn('ignoring {} ({})'.format(sidecar, error), cat='index_stale')
         return None
     if not idx.index_advisable():
@@ -804,12 +819,14 @@ def _writer_holds(vcd_path):
     if sys.platform != 'win32':
         try:
             out = subprocess.run(['lsof', '-w', '--', vcd_path],
-                                 capture_output=True, text=True, timeout=15)
+                                 capture_output=True, text=True, timeout=3)
             if out.returncode == 0 and out.stdout.strip():
                 return 'open by another process (lsof)'
         except (OSError, subprocess.TimeoutExpired):
             pass
     else:
+        if not os.access(vcd_path, os.W_OK):
+            return None  # read-only permission is not another writer
         try:
             fd = os.open(vcd_path, os.O_WRONLY)
             os.close(fd)
@@ -872,6 +889,16 @@ def maybe_auto_build(parser, vcd_path):
         return
     if _AUTO_SCRIPT_PATH is None:
         return  # imported as a library: no script to respawn
+    # Without a native builder for this platform, an automatic build would
+    # run the much slower pure-Python pass and hurt more than help — auto
+    # building is OFF by default here; build explicitly with `index`
+    # (which says so and reports the slower mechanism).
+    loader = globals().get('_load_native_library')
+    if loader is None or loader() is None:
+        _warn('automatic index building is disabled on this platform (no '
+              'native builder); run the index command to build with the '
+              'slower pure-Python mechanism', cat='index_auto_no_native')
+        return
     vcd_path = os.path.abspath(vcd_path)
     sidecar = sidecar_path(vcd_path)
     if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
@@ -887,7 +914,7 @@ def maybe_auto_build(parser, vcd_path):
     if held:
         _warn('{}: index not rebuilt automatically — source {} '
               '(rerun after the dump completes)'.format(vcd_path, held),
-              cat='index_writer_holds')
+              cat='index_writer_holds:' + vcd_path)
         return
     lock = _acquire_build_lock(sidecar)
     if lock is None:
@@ -905,7 +932,7 @@ def maybe_auto_build(parser, vcd_path):
             start_new_session=True, close_fds=True)
         _warn('{}: building index in the background '
               '(VCD_ANALYZER_AUTO_INDEX=0 disables)'.format(vcd_path),
-              cat='index_autobuild')
+              cat='index_autobuild:' + vcd_path)
     except OSError as error:
         _warn('{}: background index build failed to start: {}'.format(
             vcd_path, error), cat='index_autobuild')

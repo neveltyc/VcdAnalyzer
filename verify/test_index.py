@@ -3,9 +3,8 @@
 The index reader must be indistinguishable from the plain parser: every
 command's output, every state_at/iter_transitions window, for every
 selection — across block sizes, gate outcomes, stale sidecars and the
-kill switches. Builders are exercised per variant: the pure-Python
-builder here; the native builder (fast variant) adds the same matrix in
-test_index_native.py when its library can be loaded.
+kill switches. The pure-Python builder is exercised here; the embedded native
+builder's equivalent matrix lives in test_index_fast.py.
 """
 import argparse
 import contextlib

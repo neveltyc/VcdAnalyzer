@@ -535,28 +535,31 @@ impl Builder {
                     return Ok(());
                 }
                 // s0/s1: plain token fetch, NO structural rule (Python).
+                // Strengths are OWNED immediately: a later next_token() may
+                // refill the shared buffer and invalidate any TokRef into
+                // it (review P1-3).
                 let s0 = match self.tok.next_token()? {
                     Some(s) => {
-                        if !strength_ok(self.tok.bytes(s)) {
-                            let owned = self.tok.bytes(s).to_vec();
-                            self.pending.push_back((owned, s.off));
+                        let owned = self.tok.bytes(s).to_vec();
+                        if !strength_ok(&owned) {
+                            self.pending.push_front((owned, s.off));
                             return Ok(());
                         }
-                        s
+                        (owned, s.off)
                     }
                     None => return Ok(()),
                 };
                 let s1 = match self.tok.next_token()? {
                     Some(s) => {
-                        if !strength_ok(self.tok.bytes(s)) {
-                            // Python pushes s1 then s0; pop order s0, s1.
-                            let o1 = self.tok.bytes(s).to_vec();
-                            self.pending.push_back((o1, s.off));
-                            let o0 = self.tok.bytes(s0).to_vec();
-                            self.pending.push_back((o0, s0.off));
+                        let owned = self.tok.bytes(s).to_vec();
+                        if !strength_ok(&owned) {
+                            // Python pop order is s0, s1: front-push s1
+                            // first so s0 ends up in front.
+                            self.pending.push_front((owned, s.off));
+                            self.pending.push_front(s0.clone());
                             return Ok(());
                         }
-                        s
+                        (owned, s.off)
                     }
                     None => return Ok(()),
                 };
@@ -567,13 +570,11 @@ impl Builder {
                         }
                     }
                     None => {
-                        // Structural operand already pushed back; Python's
-                        // pop order is s0, s1, structural — so s1 then s0
-                        // go behind it.
-                        let o1 = self.tok.bytes(s1).to_vec();
-                        self.pending.push_back((o1, s1.off));
-                        let o0 = self.tok.bytes(s0).to_vec();
-                        self.pending.push_back((o0, s0.off));
+                        // Python pop order is s0, s1, structural; the
+                        // structural token is already at the BACK (pushed
+                        // by take_operand), so front-push s1 then s0.
+                        self.pending.push_front(s1.clone());
+                        self.pending.push_front(s0.clone());
                     }
                 }
             }
@@ -610,6 +611,9 @@ pub fn build_from_manifest(
     let block_bytes = next_num("block_bytes")?;
     let max_token_len = next_num("max_token_len")? as usize;
     let sym_count = next_num("symbols")? as usize;
+    if block_bytes == 0 || block_bytes > (4096u64 << 20) {
+        die!("block_bytes must be between 1 MiB-equivalent and 4096 MiB (u32 offsets)");
+    }
     let mut symbols: Vec<Vec<u8>> = Vec::with_capacity(sym_count);
     while symbols.len() < sym_count {
         match lines.next() {
@@ -643,6 +647,7 @@ pub fn build_from_manifest(
     let parallel_min = std::env::var("VCD_ANALYZER_INDEX_PARALLEL_MIN").ok()
         .and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(64 << 20);
 
+    let symtab = SymTab::new(&symbols);
     let mut splits: Vec<u64> = vec![data_start];
     if threads > 1 && size0.saturating_sub(data_start) >= parallel_min {
         for i in 1..threads {
@@ -651,8 +656,10 @@ pub fn build_from_manifest(
             if nominal <= last + (16 << 20) || nominal + (16 << 20) >= size0 {
                 continue; // keep chunks meaty; fewer workers is fine
             }
-            match find_timestamp_split(vcd_path, nominal, size0)? {
-                Some(off) if off > last + (16 << 20) && off + (16 << 20) < size0 => splits.push(off),
+            match find_timestamp_split(vcd_path, nominal, size0, &symtab)? {
+                Some((off, _time)) if off > last + (16 << 20) && off + (16 << 20) < size0 => {
+                    splits.push(off)
+                }
                 _ => {}
             }
         }
@@ -671,7 +678,7 @@ pub fn build_from_manifest(
         let file = File::open(vcd_path).map_err(|e| format!("open: {}", e))?;
         let mut b = Builder {
             tok: Tokenizer::new(file, start, end, max_token_len)?,
-            symtab: SymTab::new(&symbols),
+            symtab: SymTab::new(&symbols),  // cheap: 3.4 MB flat table per worker
             pending: VecDeque::new(),
             current: 0,
             block_start: start,
@@ -743,6 +750,13 @@ pub fn build_from_manifest(
             carried_time = w.last_time;
         }
     }
+    // Defense in depth (review P0-1): a corrupt merge must fail the build,
+    // never write a sidecar whose block times a reader would mis-bisect.
+    for window in blocks.windows(2) {
+        if window[0].3 > window[1].3 {
+            die!("internal error: block time regression after merge");
+        }
+    }
 
     let meta1 = File::open(vcd_path).and_then(|f| f.metadata())
         .map_err(|e| format!("stat: {}", e))?;
@@ -762,7 +776,11 @@ pub fn build_from_manifest(
     // header ('8s' magic + 6 u64) = 56; BLOCK = 32; DIRECTORY = 16
     let directory_bytes = 56 + 32 * nblocks as u64 + 16 * symbols.len() as u64;
 
-    let out = File::create(sidecar_path).map_err(|e| format!("create sidecar: {}", e))?;
+    // Publish atomically (review P0-2): a concurrent reader must never mmap
+    // a half-written sidecar, and the fresh-claiming header is written first
+    // — an interrupted in-place write would look valid forever.
+    let tmp_path = format!("{}.tmp.{}", sidecar_path, std::process::id());
+    let out = File::create(&tmp_path).map_err(|e| format!("create sidecar: {}", e))?;
     let mut w = BufWriter::with_capacity(1 << 20, out);
     let io = |e: std::io::Error| format!("write: {}", e);
     w.write_all(b"VCDIDX02").map_err(io)?;
@@ -798,6 +816,7 @@ pub fn build_from_manifest(
     }
     w.flush().map_err(io)?;
     drop(w);
+    std::fs::rename(&tmp_path, sidecar_path).map_err(|e| format!("publish sidecar: {}", e))?;
     let index_bytes = std::fs::metadata(sidecar_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(format!(
@@ -870,7 +889,12 @@ pub extern "C" fn vcdidx_abi_build(
 /// timestamp token is always equivalent to the sequential scan (see the
 /// thread-plan comment in build_from_manifest). None when no timestamp is
 /// found within a growing window (caller falls back to fewer workers).
-fn find_timestamp_split(vcd_path: &str, nominal: u64, file_end: u64) -> Result<Option<u64>, String> {
+fn find_timestamp_split(
+    vcd_path: &str,
+    nominal: u64,
+    file_end: u64,
+    symtab: &SymTab,
+) -> Result<Option<(u64, u64)>, String> {
     let mut f = File::open(vcd_path).map_err(|e| format!("open: {}", e))?;
     let mut window: usize = 256 << 10;
     while window <= (32 << 20) {
@@ -908,11 +932,32 @@ fn find_timestamp_split(vcd_path: &str, nominal: u64, file_end: u64) -> Result<O
                 skipped = true; // partial first token, not trustworthy
                 continue;
             }
-            if buf[start] == b'#' && i - start > 1 && buf[start + 1].is_ascii_digit() {
-                return Ok(Some(nominal + start as u64));
+            let tok = &buf[start..i];
+            // Only a timestamp that FULLY parses may anchor a split: a
+            // malformed '#1.5' would be skipped by the workers' parser
+            // (Python's tolerant-reader policy), leaving that worker with
+            // no established time and zero block times (review P0-1). A
+            // token that is a DECLARED identifier (legal per IEEE 1364
+            // 18.2.1) may be a b/r/p operand in the sequential scan, so it
+            // must not be treated as a boundary either (review P2-7).
+            if tok.len() > 1 && tok[0] == b'#' && tok[1].is_ascii_digit() {
+                if symtab.lookup(tok).is_none() {
+                    if let Some(tv) = parse_int_bytes(tok)? {
+                        // token must be complete: it ended at whitespace
+                        // (or EOF), never at the window edge
+                        if i < got || got < cap {
+                            return Ok(Some((nominal + start as u64, tv)));
+                        }
+                    }
+                }
             }
         }
         window *= 2;
     }
     Ok(None)
+}
+
+/// parse_int over a bare token (no leading '#' skip difference).
+fn parse_int_bytes(tok: &[u8]) -> Result<Option<u64>, String> {
+    parse_int(tok)
 }

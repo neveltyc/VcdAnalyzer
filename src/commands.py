@@ -9,8 +9,8 @@ def cmd_index(vcd, args):
     background auto-builder is the one exception, gated by its own lock).
     --output stores the sidecar at PATH and links <file>.vcidx to it so
     queries still find it; a failed link is reported, never fatal. The
-    fast distribution variant builds via its embedded native library; the
-    standard file uses the pure-Python pass (identical sidecar semantics).
+    full variant builds via its embedded native library when one serves
+    the platform, else the pure-Python pass (identical sidecar semantics).
     """
     sidecar = sidecar_path(args.file)
     target = os.path.abspath(args.output) if args.output else sidecar
@@ -22,13 +22,16 @@ def cmd_index(vcd, args):
         block_bytes = args.block_mib << 20
         try:
             stats = build_index_best(args.file, target, block_bytes)
-        except (ValueError, _VCDResourceError) as error:
+        except BaseException as error:
             try:
                 if os.path.exists(target):
                     os.unlink(target)  # never leave a partial sidecar behind
             except OSError:
                 pass
-            sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+            if isinstance(error, (ValueError, _VCDResourceError, struct.error,
+                                  KeyError)):
+                sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+            raise
         if args.output:
             _link_sidecar(sidecar, target)
     finally:
@@ -50,8 +53,8 @@ def cmd_index(vcd, args):
          'signal_block_pairs': stats.get('signal_block_pairs')}
     if args.json:
         if builder == 'python' and r['source_bytes'] >= 64 << 20:
-            _warn('index built with the pure-Python builder (no native '
-                  'library for this platform)', cat='index_fast_hint')
+            _warn('index built with the slower pure-Python mechanism '
+                  '(no native builder for this platform)', cat='index_slow_build')
         _json(r)
         return
     print('Built    : {}'.format(target))
@@ -65,9 +68,9 @@ def cmd_index(vcd, args):
     if builder == 'python' and r['source_bytes'] >= 64 << 20:
         # Full variant, no library for this platform: say so when the file
         # is big enough for the difference to matter.
-        print('Note     : no native library for this platform — pure-Python '
-              'builder (~30 MB/s). Supported platforms build natively with up '
-              'to 4 threads (~2 GB/s).')
+        print('Note     : no native builder for this platform — building with '
+              'the pure-Python index mechanism (much slower). Supported '
+              'platforms build natively with up to 4 threads.')
     print('Use      : queries pick this up automatically; VCD_ANALYZER_NO_INDEX=1 disables')
 
 

@@ -73,6 +73,12 @@ def test_fast_unsupported_platform_falls_back(monkeypatch):
     monkeypatch.setattr(va, '_native_platform_key', lambda: None)
     assert va._NATIVE_INDEX_BUILD('whatever', 'whatever.idx', 8) is None
     assert va.native_index_build('whatever', 'whatever.idx', 8) is None
+    # and automatic building is off by default there (it would only run
+    # the slow pure-Python pass): one notice, no background spawn
+    va._warned.clear()
+    import argparse as _ap
+    opts = _ap.Namespace(file='whatever')
+    assert va.maybe_auto_build(va.VCDParser.__new__(va.VCDParser), 'whatever') is None
 
 
 def test_fast_non_monotonic_clean_error(tmp_path):

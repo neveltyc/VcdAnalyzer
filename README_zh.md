@@ -126,6 +126,8 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   O(1)，不做内容哈希。索引陈旧时警告一次并由纯解析器回答；源文件疑似仍在
   被写入时（mtime < 5 秒、lsof 显示被持有、Windows 共享冲突）自动重建被
   跳过并给出提示。
+- 无内嵌原生库的平台上，后台自动构建默认关闭（只会跑慢得多的纯
+  Python 路径）——`index` 命令仍可用，并会说明所用机制。
 - 环境变量：`VCD_ANALYZER_AUTO_INDEX=0` 关闭后台构建，
   `VCD_ANALYZER_NO_INDEX=1` 完全禁用索引，
   `VCD_ANALYZER_INDEX_THREADS=N` 限制原生构建线程数（默认 min(4, 核数)）。

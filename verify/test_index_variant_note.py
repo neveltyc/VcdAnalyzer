@@ -83,13 +83,12 @@ def test_full_python_fallback_advises_on_big_files(tmp_path, monkeypatch):
                                  limit=None, verbose=False)
     with contextlib.redirect_stdout(out):
         va.cmd_index(va.VCDParser(str(src)), options)
-    assert 'no native library for this platform' in out.getvalue()
-    assert not os.path.exists(va.sidecar_path(src)) or True
+    assert 'no native builder for this platform' in out.getvalue()
 
 
 def test_full_native_does_not_nag(tmp_path):
     src = _big_file(tmp_path)
     result = _run(FULL, ['index', str(src)])
     assert result.returncode == 0, result.stderr
-    assert 'no native library' not in result.stdout
+    assert 'no native builder' not in result.stdout
     assert 'VCD_ANALYZER_INDEX_THREADS is ignored' not in result.stderr

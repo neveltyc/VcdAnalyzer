@@ -146,8 +146,10 @@ python3 vcd_analyzer.py index <file> [--block-mib 8] [--force] [--output PATH]
 Builds `<file>.vcidx`. Every query command then uses it automatically when
 fresh — output unchanged, big-dump point queries become sub-second. If you
 never run it, the first query on a big file starts a background build by
-itself (`VCD_ANALYZER_AUTO_INDEX=0` disables). Rebuild is skipped with a
-message while the dump still looks open for writing. Key JSON fields:
+itself (`VCD_ANALYZER_AUTO_INDEX=0` disables; on platforms without an
+embedded native builder automatic builds are off by default — run `index`
+explicitly, which reports the slower pure-Python mechanism). Rebuild is
+skipped with a message while the dump still looks open for writing. Key JSON fields:
 `builder`, `index_bytes`, `blocks`, `build_s`.
 
 ### 8. search — condition-based query (three modes)

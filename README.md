@@ -133,6 +133,9 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   answers; an automatic rebuild is skipped (with a message) while the source
   looks still-open-for-write (mtime < 5 s, an `lsof` holder, or a Windows
   sharing violation).
+- On platforms without an embedded native builder, automatic builds are off
+  by default (they would only run the much slower pure-Python pass) — the
+  `index` command still works there and says which mechanism it used.
 - Environment: `VCD_ANALYZER_AUTO_INDEX=0` disables background builds,
   `VCD_ANALYZER_NO_INDEX=1` disables index use entirely,
   `VCD_ANALYZER_INDEX_THREADS=N` caps the native build threads (default

@@ -49,6 +49,9 @@ def cmd_index(vcd, args):
          'raw_symbols': stats.get('raw_symbols'),
          'signal_block_pairs': stats.get('signal_block_pairs')}
     if args.json:
+        if builder == 'python' and r['source_bytes'] >= 64 << 20:
+            _warn('index built with the pure-Python builder (no native '
+                  'library for this platform)', cat='index_fast_hint')
         _json(r)
         return
     print('Built    : {}'.format(target))
@@ -59,6 +62,13 @@ def cmd_index(vcd, args):
     print('Symbols  : {} raw, {:,} signal-block pairs'.format(
         r['raw_symbols'], r['signal_block_pairs']))
     print('Time     : {:.3f}s'.format(r['build_s']))
+    if builder == 'python' and r['source_bytes'] >= 64 << 20:
+        # Same feature on both variants, never a gate: the fast variant
+        # only adds the native builder. Big file + slow builder is exactly
+        # when the user should know the other variant exists.
+        print('Note     : no native library for this platform — pure-Python '
+              'builder (~30 MB/s). Supported platforms build natively with up '
+              'to 4 threads (~2 GB/s).')
     print('Use      : queries pick this up automatically; VCD_ANALYZER_NO_INDEX=1 disables')
 
 

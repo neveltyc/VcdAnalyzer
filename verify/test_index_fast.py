@@ -1,7 +1,5 @@
-"""End-to-end tests for the fast distribution variant (embedded native
-index builder). Skipped unless vcd_analyzer_fast.py has been generated
-(python _make.py --fast) — CI builds the standard file only, so these run
-on release/dev machines where the native libraries exist.
+"""End-to-end tests for the full variant's embedded native index builder
+(vcd_analyzer.py carries the native part; vcd_analyzer_lite.py has none).
 """
 import json
 import os
@@ -15,19 +13,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vcd_analyzer as va
 
 ROOT = Path(__file__).resolve().parents[1]
-FAST = ROOT / 'vcd_analyzer_fast.py'
+FULL = ROOT / 'vcd_analyzer.py'
 FIXTURES = sorted((Path(__file__).parent / 'fixtures').glob('*.vcd')) + \
            sorted((Path(__file__).parent / 'samples').glob('*.vcd'))
-
-pytestmark = pytest.mark.skipif(
-    not FAST.exists(), reason='vcd_analyzer_fast.py not generated (python _make.py --fast)')
 
 
 def run_fast(args, env_extra=None):
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
-    return subprocess.run([sys.executable, str(FAST)] + args,
+    return subprocess.run([sys.executable, str(FULL)] + args,
                           capture_output=True, text=True, env=env)
 
 
@@ -72,17 +67,12 @@ def test_fast_native_sidecar_matches_python(tmp_path):
     assert checks > 100
 
 
-def test_fast_unsupported_platform_falls_back():
+def test_fast_unsupported_platform_falls_back(monkeypatch):
     """No knob: a platform without an embedded library silently uses the
     pure-Python builder (the only supported way to reach it)."""
-    import vcd_analyzer_fast as fast
-    saved = fast._native_platform_key
-    fast._native_platform_key = lambda: None
-    try:
-        assert fast._NATIVE_INDEX_BUILD('whatever', 'whatever.idx', 8) is None
-        assert fast.native_index_build('whatever', 'whatever.idx', 8) is None
-    finally:
-        fast._native_platform_key = saved
+    monkeypatch.setattr(va, '_native_platform_key', lambda: None)
+    assert va._NATIVE_INDEX_BUILD('whatever', 'whatever.idx', 8) is None
+    assert va.native_index_build('whatever', 'whatever.idx', 8) is None
 
 
 def test_fast_non_monotonic_clean_error(tmp_path):

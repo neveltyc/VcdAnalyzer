@@ -734,6 +734,11 @@ def build_index_best(path, sidecar, block_bytes=8 << 20):
     if stats is not None:
         stats['builder'] = 'native'
         return stats
+    if os.environ.get('VCD_ANALYZER_INDEX_THREADS'):
+        # Works identically on both variants; the thread count only feeds
+        # the native builder, so say so instead of silently ignoring it.
+        _warn('VCD_ANALYZER_INDEX_THREADS is ignored: no native builder '
+              'is available on this platform', cat='index_threads_hint')
     stats = build_index(path, sidecar, block_bytes)
     stats['builder'] = 'python'
     return stats

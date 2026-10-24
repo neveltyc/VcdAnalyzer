@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Assemble src/ into the single-file vcd_analyzer.py for release.
+"""Assemble src/ into the release single files.
 
 Usage:
-    python _make.py          # build vcd_analyzer.py
-    python _make.py --check  # verify vcd_analyzer.py matches src/
+    python _make.py           # build vcd_analyzer.py (full) and vcd_analyzer_lite.py
+    python _make.py --full    # build vcd_analyzer.py only (needs native/dist/)
+    python _make.py --lite    # build vcd_analyzer_lite.py only
+    python _make.py --check   # verify both tracked files against src/
 
 The module order matches the Part numbering in the assembled file:
 
@@ -13,8 +15,11 @@ The module order matches the Part numbering in the assembled file:
     values.py       Part 2:  value formatting, clamping, filter patterns
     parser.py       Part 3:  VCDParser (header, bit-exploded reassembly,
                              change stream)  (syncs with OpenWaveAnalyzer)
-    index.py        Part 4:  optional .vcidx block-index sidecar (reader,
-                             pure-Python builder, usage gate)
+    index_stub.py   Part 4:  index-sidecar stub — the STANDARD build keeps
+                             1.5.6 pure-Python behavior; index attempts get
+                             a clear "fast variant only" error
+    (the FAST build, _make.py --fast, puts index.py in this slot instead:
+    the .vcidx reader, native/pure builders, usage gate, auto-build)
     output.py       Part 5:  JSON/text output helpers, limits, truncation
     conditions.py   Part 6:  search condition parse/resolve/evaluate and
                              per-timestamp stream grouping
@@ -49,12 +54,13 @@ SRC_DIR = HERE / 'src'
 OUTPUT = HERE / 'vcd_analyzer.py'
 
 # Assembly order — must match the Part sequence.
-MODULE_ORDER = [
+SHARED_PARTS = [
     '_preamble.py',
     'timebase.py',
     'values.py',
     'parser.py',
-    'index.py',
+]
+TAIL_PARTS = [
     'output.py',
     'conditions.py',
     'summary.py',
@@ -62,13 +68,21 @@ MODULE_ORDER = [
     'cli.py',
 ]
 
+# Standard variant: 1.5.6 behavior, no index machinery (stub occupies the
+# Part-4 slot so commands/CLI assemble unchanged).
+MODULE_ORDER = SHARED_PARTS + ['index_stub.py'] + TAIL_PARTS
+
+# Fast variant: the real index engine replaces the stub; the generated
+# native part is inserted just before cli.py by assemble_fast().
+FAST_MODULE_ORDER = SHARED_PARTS + ['index.py'] + TAIL_PARTS
+
 _TOP_LEVEL_IMPORT = re.compile(r'^(?:import|from)\s', re.MULTILINE)
 
 
-def check_discipline(text_by_module):
+def check_discipline(text_by_module, order):
     """Only _preamble.py may import at module level (column-0 import/from)."""
     problems = []
-    for name in MODULE_ORDER:
+    for name in order:
         if name == '_preamble.py':
             continue
         match = _TOP_LEVEL_IMPORT.search(text_by_module[name])
@@ -79,18 +93,22 @@ def check_discipline(text_by_module):
 
 
 def assemble() -> str:
+    return _concat(MODULE_ORDER)
+
+
+def _concat(order):
     parts = {}
-    for name in MODULE_ORDER:
+    for name in order:
         path = SRC_DIR / name
         if not path.exists():
             sys.exit(f'Error: missing module {path}')
         parts[name] = path.read_text(encoding='utf-8')
-    problems = check_discipline(parts)
+    problems = check_discipline(parts, order)
     if problems:
         for p in problems:
             print(f'Error: {p}', file=sys.stderr)
         sys.exit(1)
-    return ''.join(parts[name] for name in MODULE_ORDER)
+    return ''.join(parts[name] for name in order)
 
 
 # -- fast variant ------------------------------------------------------------
@@ -104,9 +122,10 @@ def assemble() -> str:
 # CI checks the standard file only: the fast file needs the Rust toolchain
 # to reproduce (native/build_all.sh), so it is generated at release time.
 
-FAST_OUTPUT = HERE / 'vcd_analyzer_fast.py'
+FULL_OUTPUT = HERE / 'vcd_analyzer.py'
+LITE_OUTPUT = HERE / 'vcd_analyzer_lite.py'
 BUILD_DIR = HERE / 'build'
-FAST_PART_NAME = '_fast_native.py'
+FULL_PART_NAME = '_fast_native.py'   # generated; name kept for git history
 NATIVE_DIST = HERE / 'native' / 'dist'
 NATIVE_LIBS = (
     ('aarch64-linux', 'aarch64-linux.so', '.so'),
@@ -248,6 +267,10 @@ def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes):
 '''
 
 
+def fast_builder_ready() -> bool:
+    return all((NATIVE_DIST / f).exists() for _, f, _e in NATIVE_LIBS)
+
+
 def generate_fast_part() -> Path:
     BUILD_DIR.mkdir(exist_ok=True)
     entries = []
@@ -267,73 +290,83 @@ def generate_fast_part() -> Path:
             "    '{}': {{'ext': '{}', 'sha256': '{}', 'size': {}, 'data': {}}},".format(
                 key, ext, sha, len(raw), data))
     text = _FAST_TEMPLATE.replace('__LIBS__', '\n'.join(entries))
-    part = BUILD_DIR / FAST_PART_NAME
+    part = BUILD_DIR / FULL_PART_NAME
     part.write_text(text, encoding='utf-8', newline='\n')
     return part
 
 
-def assemble_fast() -> str:
+def assemble_full() -> str:
+    """head + generated native part + cli.py. The native part MUST precede
+    cli.py: the __main__ block runs main() at import-completion, and
+    main() -> index needs _NATIVE_INDEX_BUILD to already exist."""
     part = generate_fast_part()
-    texts = {}
-    for name in MODULE_ORDER:
-        path = SRC_DIR / name
-        texts[name] = path.read_text(encoding='utf-8')
-    problems = check_discipline(texts)
-    if problems:
-        for p in problems:
-            print(f'Error: {p}', file=sys.stderr)
-        sys.exit(1)
-    texts[FAST_PART_NAME] = part.read_text(encoding='utf-8')
-    order = list(MODULE_ORDER)
-    order.insert(order.index('cli.py'), FAST_PART_NAME)
-    return ''.join(texts[name] for name in order)
+    head = _concat(FAST_MODULE_ORDER[:-1])
+    tail = (SRC_DIR / FAST_MODULE_ORDER[-1]).read_text(encoding='utf-8')
+    return head + part.read_text(encoding='utf-8') + tail
+
+
+def full_head_tail():
+    head = _concat(FAST_MODULE_ORDER[:-1])
+    tail = (SRC_DIR / FAST_MODULE_ORDER[-1]).read_text(encoding='utf-8')
+    return head, tail
+
+
+def _report(name, ok, detail=''):
+    print(('OK: ' if ok else 'MISMATCH: ') + name + ((' ' + detail) if detail else ''))
+    return 0 if ok else 1
+
+
+def check_full() -> int:
+    """The full file embeds generated blobs that need the Rust toolchain,
+    so --check verifies its src/-derived head and tail byte-exactly and
+    the native part structurally."""
+    if not FULL_OUTPUT.exists():
+        return _report(FULL_OUTPUT.name, False, 'missing; run: python _make.py --full')
+    head, tail = full_head_tail()
+    current = FULL_OUTPUT.read_text(encoding='utf-8').replace('\r\n', '\n')
+    if not current.startswith(head):
+        return _report(FULL_OUTPUT.name, False, 'head (src/ parts) drifted; rerun _make.py')
+    if not current.endswith(tail):
+        return _report(FULL_OUTPUT.name, False, 'tail (cli.py) drifted; rerun _make.py')
+    middle = current[len(head):len(current) - len(tail)]
+    ok = ('GENERATED by' in middle and 'Fast variant part' in middle
+          and '_NATIVE_LIBS' in middle and len(middle) > 1000)
+    return _report(FULL_OUTPUT.name, ok,
+                   '' if ok else 'native part malformed; rerun _make.py --full')
 
 
 def main():
     check_mode = '--check' in sys.argv
-    fast_mode = '--fast' in sys.argv
-
-    if fast_mode:
-        assembled = assemble_fast()
-        output = FAST_OUTPUT
-    else:
-        assembled = assemble()
-        output = OUTPUT
+    full_mode = '--full' in sys.argv
+    lite_mode = '--lite' in sys.argv
 
     if check_mode:
-        if not output.exists():
-            sys.exit(f'Error: {output} does not exist; run without --check first')
-        current = output.read_text(encoding='utf-8')
-        # Normalize line endings for comparison
-        current_norm = current.replace('\r\n', '\n')
-        assembled_norm = assembled.replace('\r\n', '\n')
-        if current_norm == assembled_norm:
-            print(f'OK: {OUTPUT.name} matches src/')
-            return
-        cur_lines = current_norm.splitlines()
-        asm_lines = assembled_norm.splitlines()
-        shown = 0
-        for i, (a, b) in enumerate(zip(cur_lines, asm_lines)):
-            if a != b:
-                print(f'MISMATCH at line {i+1}:')
-                print(f'  release: {a[:120]}')
-                print(f'  src:     {b[:120]}')
-                shown += 1
-                if shown >= 3:
-                    break
-        if not shown:
-            diff = len(cur_lines) - len(asm_lines)
-            print(f'MISMATCH: line count differs by {diff} '
-                  f'(release={len(cur_lines)}, src={len(asm_lines)}); '
-                  f'rerun: python _make.py')
-        sys.exit(1)
+        failures = 0
+        assembled = assemble()
+        if LITE_OUTPUT.exists():
+            current = LITE_OUTPUT.read_text(encoding='utf-8').replace('\r\n', '\n')
+            same = current == assembled.replace('\r\n', '\n')
+            failures += _report(LITE_OUTPUT.name, same,
+                                '' if same else 'differs from src/; rerun _make.py')
+        else:
+            failures += _report(LITE_OUTPUT.name, False, 'missing; run: python _make.py --lite')
+        failures += check_full()
+        sys.exit(1 if failures else 0)
 
-    output.write_text(assembled, encoding='utf-8', newline='\n')
-    line_count = assembled.count('\n')
-    size_kb = len(assembled.encode()) / 1024
-    print(f'Assembled {output.name}: {line_count} lines, '
-          f'{size_kb:.0f} KB from {len(MODULE_ORDER)} modules'
-          + (' + native part' if fast_mode else ''))
+    outputs = []
+    if lite_mode or not full_mode:
+        outputs.append((LITE_OUTPUT, assemble()))
+    if full_mode or not lite_mode:
+        if fast_builder_ready():
+            outputs.append((FULL_OUTPUT, assemble_full()))
+        elif full_mode:
+            sys.exit('Error: native/dist/ libraries missing — run native/build_all.sh')
+        else:
+            print('note: full variant skipped (native/dist/ absent)')
+    for output, assembled in outputs:
+        output.write_text(assembled, encoding='utf-8', newline='\n')
+        print(f'Assembled {output.name}: {assembled.count(chr(10))} lines, '
+              f'{len(assembled.encode()) / 1024:.0f} KB')
 
 
 if __name__ == '__main__':

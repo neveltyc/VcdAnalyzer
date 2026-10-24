@@ -721,7 +721,14 @@ class IndexedVCD(VCDParser):
         required=self.selected_raw(sids)
         if not required:return
         try:
-            candidates=self.candidate_blocks(required,t0,t1,include_range=bool(self._bit_state_template))
+            # Bus commit fidelity needs the range read ONLY when this query
+            # actually selects synthesized buses (a repeated '#T' with no bus
+            # writes in between is a suppressed no-op; a gap '#T' terminating
+            # a selected bus's writes is not). Scalar-only queries on a file
+            # that merely CONTAINS buses must keep hit-block random access.
+            needs_bus=(sids is None
+                       or any(s in self._bit_state_template for s in sids))
+            candidates=self.candidate_blocks(required,t0,t1,include_range=needs_bus)
         except _CorruptSidecarError:
             self.counters['corrupt_fallback']=True
             yield from super()._iter_changes(t0,t1,sids)
@@ -852,6 +859,10 @@ def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
     stats = build_index(path, sidecar, block_bytes)
     stats['builder'] = 'python'
     return stats
+
+
+def _variant_env_notice():
+    """Full variant: every documented option works; nothing to warn about."""
 
 
 def try_index(vcd_path):

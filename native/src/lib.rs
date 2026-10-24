@@ -404,7 +404,7 @@ struct Builder {
     block_bytes: u64,
     max_block_bytes: u64,
     first_time: Option<u64>,
-    saw_opener: bool,
+    left_open: bool,
 }
 
 impl Builder {
@@ -469,10 +469,17 @@ impl Builder {
     }
 
     /// Drain a '$X ... $end' section body; body tokens are not items.
+    /// Sets left_open when the range ended WITHOUT the closing '$end' —
+    /// i.e. the body may continue in the next worker (review F4-v2: only
+    /// a body SPANNING a split makes byte-level anchors unsound; a body
+    /// fully contained in one worker is handled by that worker's own
+    /// context and never needs a fallback).
     fn drain_section(&mut self) -> Result<(), String> {
+        let mut found_end = false;
         while let Some(t) = self.tok.next_token()? {
-            if self.tok.bytes(t) == b"$end" { break; }
+            if self.tok.bytes(t) == b"$end" { found_end = true; break; }
         }
+        self.left_open = !found_end;
         Ok(())
     }
 
@@ -518,14 +525,7 @@ impl Builder {
     fn apply_fresh(&mut self, t: TokRef, class: Class) -> Result<(), String> {
         match class {
             Class::MarkerKnown => {}
-            Class::SectionOpen => {
-                // A section opener means byte-level split anchors may not
-                // be top-level: the merge falls back to a single-threaded
-                // rebuild when any worker saw one (zero extra I/O — the
-                // worker parses every byte anyway).
-                self.saw_opener = true;
-                self.drain_section()?;
-            }
+            Class::SectionOpen => self.drain_section()?,
             Class::Time(v) => {
                 if v < self.current {
                     die!("non-monotonic timestamps: index requires fallback");
@@ -707,7 +707,7 @@ pub fn build_from_manifest(
         first_time: Option<u64>,
         last_time: u64,
         max_block_bytes: u64,
-        saw_opener: bool,
+        left_open: bool,
     }
 
     let parse = |start: u64, end: u64| -> Result<WorkerOut, String> {
@@ -726,7 +726,7 @@ pub fn build_from_manifest(
             block_bytes,
             max_block_bytes: 0,
             first_time: None,
-            saw_opener: false,
+            left_open: false,
         };
         b.run(end)?;
         Ok(WorkerOut {
@@ -735,7 +735,7 @@ pub fn build_from_manifest(
             postings: b.postings,
             last_time: b.current,
             max_block_bytes: b.max_block_bytes,
-            saw_opener: b.saw_opener,
+            left_open: b.left_open,
         })
     };
 
@@ -756,16 +756,17 @@ pub fn build_from_manifest(
         });
         workers = outs.into_iter().collect::<Result<Vec<_>, String>>()?;
     }
-    // Soundness gate AFTER the fact (review F4, v2): byte-level split
-    // anchors cannot know grammar context — a '#T' inside a $comment body
-    // that spans a split point would be misread as a timestamp by the
-    // worker starting there. Workers parse every byte anyway, so each
-    // simply reports whether it saw a section opener; if any did, the
-    // parallel result is discarded and the fully context-aware
-    // single-threaded parse runs instead. Files without section openers
-    // (the common huge dump) keep the full parallel speed with ZERO extra
-    // I/O — no pre-scan.
-    if workers.iter().any(|w| w.saw_opener) && splits.len() > 2 {
+    // Soundness gate AFTER the fact (review F4, v3): a byte-level split
+    // anchor is unsound ONLY when a section body SPANS it — the worker
+    // starting mid-body would misread comment text as timestamps. Each
+    // worker reports whether its range ended inside an unclosed body;
+    // contained bodies (opener and $end in the same worker) are handled
+    // by that worker's own context and never trigger a fallback. The
+    // last worker's unclosed body ends at EOF, which nothing crosses.
+    // Zero extra I/O: workers parse every byte anyway.
+    let parallel_fallback = splits.len() > 2
+        && workers[..workers.len() - 1].iter().any(|w| w.left_open);
+    if parallel_fallback {
         workers.clear();
         workers.push(parse(data_start, size0)?);
     }
@@ -884,9 +885,10 @@ pub fn build_from_manifest(
     let index_bytes = std::fs::metadata(sidecar_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(format!(
-        "{{\"build_s\":{:.4},\"source_bytes\":{},\"index_bytes\":{},\"blocks\":{},\"raw_symbols\":{},\"signal_block_pairs\":{},\"max_block_bytes\":{},\"posting_mode\":{},\"threads\":{}}}",
+        "{{\"build_s\":{:.4},\"source_bytes\":{},\"index_bytes\":{},\"blocks\":{},\"raw_symbols\":{},\"signal_block_pairs\":{},\"max_block_bytes\":{},\"posting_mode\":{},\"threads\":{},\"parallel_fallback\":{}}}",
         started.elapsed().as_secs_f64(), size0, index_bytes, nblocks,
-        symbols.len(), pairs, max_block_bytes, mode, threads_used
+        symbols.len(), pairs, max_block_bytes, mode, threads_used,
+        parallel_fallback
     ))
 }
 

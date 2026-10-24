@@ -228,3 +228,134 @@ def test_output_requires_vcidx_suffix(tmp_path):
     result = run_cli(['index', str(src), '--output', str(good)])
     assert result.returncode == 0, result.stderr
     assert good.exists()
+
+
+# ---- fourth-round review regressions ---------------------------------------
+
+def _bus_and_scalars(path):
+    """64 scalars + one 8-bit exploded bus; the bus writes ONLY in the
+    first ~2%, the scalars write throughout."""
+    bits = ['!', '"', '#', '$', '%', '&', "'", '(']
+    syms = [chr(40 + i) for i in range(64)]  # ')','*',...
+    with open(path, 'w') as out:
+        out.write('$timescale 1ps $end $scope module top $end\n')
+        for i, s in enumerate(syms):
+            out.write('$var wire 1 {} sc{} $end\n'.format(s, i))
+        for i, s in enumerate(bits):
+            out.write('$var wire 1 {} bus [{}] $end\n'.format(s, i))
+        out.write('$upscope $end\n$enddefinitions $end\n')
+        t = 0
+        while path.stat().st_size < 8 << 20:
+            chunk = ['#%d\n' % t]
+            for i, s in enumerate(syms):
+                chunk.append('%d%s\n' % (t // 5 % 2, s))
+            if t < 200000:  # bus writes only near the start
+                for i, s in enumerate(bits):
+                    chunk.append('%d%s\n' % (t // 7 % 2, s))
+            out.write(''.join(chunk))
+            t += 2
+    return syms, bits
+
+
+def test_scalar_query_not_widened_by_unrelated_buses(tmp_path):
+    """A scalar-only selection must keep hit-block random access even when
+    the file contains exploded buses (round-4 review: include_range was
+    keyed on the FILE having buses, not the QUERY selecting one)."""
+    path = tmp_path / 'bus.vcd'
+    syms, _bits = _bus_and_scalars(path)
+    va.build_index(path, tmp_path / 'b.vcidx', 1 << 20)
+    raw = va.VCDParser(str(path))
+    scalar_sid = next(s for s in raw.signals if raw.signals[s]['path'].endswith('sc63'))
+    idx = va.IndexedVCD(path, tmp_path / 'b.vcidx', enforce_gate=False)
+    try:
+        # window far from any bus write; scalar-only selection
+        span = idx.blocks[-1][3]
+        a, b = span * 80 // 100, span * 85 // 100
+        exp = list(raw.iter_transitions(a, b, {scalar_sid}))
+        act = list(idx.iter_transitions(a, b, {scalar_sid}))
+        assert exp == act
+        assert idx.counters['blocks'] <= 3, (
+            'scalar query read {} blocks — bus widening still active'.format(
+                idx.counters['blocks']))
+    finally:
+        idx.close()
+
+
+def test_native_contained_comment_keeps_parallel(tmp_path):
+    """A $comment fully inside one worker's range must NOT trigger the
+    single-threaded fallback (parallel_fallback False, threads 4)."""
+    path = tmp_path / 'cmt.vcd'
+    filler = 'lorem ipsum dolor sit amet ' * 2000
+    with open(path, 'w') as out:
+        out.write('$timescale 1ps $end $scope module top $end '
+                  '$var wire 1 ! a $end $upscope $end $enddefinitions $end\n')
+        out.write('#0\n1!\n')
+        out.write('$comment %s $end\n' % filler)  # ~52 KB, well before 25%
+        t = 2
+        while path.stat().st_size < 70 << 20:
+            out.write('#%d\n0!\n1!\n' % t)
+            t += 2
+    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
+               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
+    result = subprocess.run(
+        [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
+         str(path), '--output', str(tmp_path / 'c.vcidx'), '--block-mib', '2'],
+        capture_output=True, text=True, env=env, timeout=300)
+    assert result.returncode == 0, result.stderr
+    stats = json.loads(result.stdout)
+    assert stats['threads'] == 4
+    assert stats['parallel_fallback'] is False
+    idx = va.IndexedVCD(path, tmp_path / 'c.vcidx', enforce_gate=False)
+    raw = va.VCDParser(str(path))
+    try:
+        span = idx.blocks[-1][3]
+        for frac in (10, 50, 90):
+            a = span * frac // 100
+            assert (list(raw.iter_transitions(a, a + max(1, span // 100), None))
+                    == list(idx.iter_transitions(a, a + max(1, span // 100), None)))
+    finally:
+        idx.close()
+
+
+def test_native_straddling_comment_falls_back(tmp_path):
+    """A $comment body SPANNING the midpoint split (2 MB of text starting
+    just before size/2, containing a '#123456' token so the anchor lands
+    inside it) must fall back to the single-threaded parse — and the
+    result must still equal the plain parser."""
+    path = tmp_path / 'straddle.vcd'
+    half_filler = 'rebuild pending #987654 todo ' * 70000  # ~2 MB
+    with open(path, 'w') as out:
+        out.write('$timescale 1ps $end $scope module top $end '
+                  '$var wire 1 ! a $end $upscope $end $enddefinitions $end\n')
+        out.write('#0\n1!\n')
+        t = 2
+        # stop at 34 MiB so the 2 MB comment body spans the file midpoint
+        # (the split anchor is the first '#digits' at/after size/2, which
+        # then lands INSIDE the comment body)
+        while path.stat().st_size < 34 << 20:
+            out.write('#%d\n0!\n1!\n' % t)
+            t += 2
+        out.write('$comment %s $end\n' % half_filler)
+        while path.stat().st_size < 70 << 20:
+            out.write('#%d\n0!\n1!\n' % t)
+            t += 2
+    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
+               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
+    result = subprocess.run(
+        [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
+         str(path), '--output', str(tmp_path / 's.vcidx'), '--block-mib', '2'],
+        capture_output=True, text=True, env=env, timeout=300)
+    assert result.returncode == 0, result.stderr
+    stats = json.loads(result.stdout)
+    assert stats['parallel_fallback'] is True
+    idx = va.IndexedVCD(path, tmp_path / 's.vcidx', enforce_gate=False)
+    raw = va.VCDParser(str(path))
+    try:
+        span = idx.blocks[-1][3]
+        for frac in (10, 50, 90):
+            a = span * frac // 100
+            assert (list(raw.iter_transitions(a, a + max(1, span // 100), None))
+                    == list(idx.iter_transitions(a, a + max(1, span // 100), None)))
+        assert idx.state_at(span // 2) == raw.state_at(span // 2)
+    finally:
+        idx.close()

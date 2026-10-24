@@ -1979,12 +1979,17 @@ def sidecar_path(vcd_path):
     return str(vcd_path) + '.vcidx'
 
 
-def try_index(vcd_path):
-    """No index in the standard build; surface misdirected settings."""
+def _variant_env_notice():
+    """Lite build: surface misdirected full-version options for every
+    command (full variant: same-name no-op — nothing to warn about)."""
     for var in ('VCD_ANALYZER_AUTO_INDEX', 'VCD_ANALYZER_INDEX_THREADS'):
         if os.environ.get(var):
             _warn('{} is a full-version option and is ignored by this '
                   'lite build'.format(var), cat='index_full_only_' + var)
+
+
+def try_index(vcd_path):
+    """No index in the lite build."""
     return None
 
 
@@ -3129,7 +3134,8 @@ def cmd_index(vcd, args):
          'blocks': stats.get('blocks'),
          'raw_symbols': stats.get('raw_symbols'),
          'signal_block_pairs': stats.get('signal_block_pairs'),
-         'threads': stats.get('threads', 1)}
+         'threads': stats.get('threads', 1),
+         'parallel_fallback': stats.get('parallel_fallback', False)}
     if args.json:
         if builder == 'python' and r['source_bytes'] >= 64 << 20:
             _warn('index built with the slower pure-Python mechanism '
@@ -3900,6 +3906,7 @@ def main():
     if not args.cmd:
         p.print_help()
         sys.exit(1)
+    _variant_env_notice()
     block_mib = getattr(args, 'block_mib', None)
     if block_mib is not None and not 1 <= block_mib <= 4096:
         sys.exit('Error: --block-mib must be between 1 and 4096')
@@ -3915,10 +3922,13 @@ def main():
         cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
                 'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search,
                 'index': cmd_index}
-        # The index only accelerates reads; a missing/stale/rejected
-        # sidecar silently keeps the plain parser (one warning at most).
-        vcd = try_index(args.file) or VCDParser(args.file)
-        if args.cmd != 'index':
+        # The index accelerates only the change-stream commands; info,
+        # list and index itself run on the plain parser (no sidecar mmap,
+        # no auto-build judgment on their behalf).
+        stream_cmd = args.cmd in ('dump', 'summary', 'snapshot', 'compare', 'search')
+        vcd = (try_index(args.file) or VCDParser(args.file)) if stream_cmd \
+            else VCDParser(args.file)
+        if stream_cmd:
             maybe_auto_build(vcd, args.file)
         try:
             if vcd.timescale_warning:

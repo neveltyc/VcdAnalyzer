@@ -18,12 +18,17 @@ def sidecar_path(vcd_path):
     return str(vcd_path) + '.vcidx'
 
 
-def try_index(vcd_path):
-    """No index in the standard build; surface misdirected settings."""
+def _variant_env_notice():
+    """Lite build: surface misdirected full-version options for every
+    command (full variant: same-name no-op — nothing to warn about)."""
     for var in ('VCD_ANALYZER_AUTO_INDEX', 'VCD_ANALYZER_INDEX_THREADS'):
         if os.environ.get(var):
             _warn('{} is a full-version option and is ignored by this '
                   'lite build'.format(var), cat='index_full_only_' + var)
+
+
+def try_index(vcd_path):
+    """No index in the lite build."""
     return None
 
 

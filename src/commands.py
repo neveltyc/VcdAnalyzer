@@ -64,7 +64,8 @@ def cmd_index(vcd, args):
          'blocks': stats.get('blocks'),
          'raw_symbols': stats.get('raw_symbols'),
          'signal_block_pairs': stats.get('signal_block_pairs'),
-         'threads': stats.get('threads', 1)}
+         'threads': stats.get('threads', 1),
+         'parallel_fallback': stats.get('parallel_fallback', False)}
     if args.json:
         if builder == 'python' and r['source_bytes'] >= 64 << 20:
             _warn('index built with the slower pure-Python mechanism '

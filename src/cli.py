@@ -95,6 +95,7 @@ def main():
     if not args.cmd:
         p.print_help()
         sys.exit(1)
+    _variant_env_notice()
     block_mib = getattr(args, 'block_mib', None)
     if block_mib is not None and not 1 <= block_mib <= 4096:
         sys.exit('Error: --block-mib must be between 1 and 4096')
@@ -110,10 +111,13 @@ def main():
         cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
                 'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search,
                 'index': cmd_index}
-        # The index only accelerates reads; a missing/stale/rejected
-        # sidecar silently keeps the plain parser (one warning at most).
-        vcd = try_index(args.file) or VCDParser(args.file)
-        if args.cmd != 'index':
+        # The index accelerates only the change-stream commands; info,
+        # list and index itself run on the plain parser (no sidecar mmap,
+        # no auto-build judgment on their behalf).
+        stream_cmd = args.cmd in ('dump', 'summary', 'snapshot', 'compare', 'search')
+        vcd = (try_index(args.file) or VCDParser(args.file)) if stream_cmd \
+            else VCDParser(args.file)
+        if stream_cmd:
             maybe_auto_build(vcd, args.file)
         try:
             if vcd.timescale_warning:

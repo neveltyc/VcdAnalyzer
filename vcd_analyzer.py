@@ -2151,7 +2151,7 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
     start = data_start(path)
     block_start = start
     block_initial = 0
-    fd = os.open(path, os.O_RDONLY)
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
     stat_before = os.fstat(fd)
     def as_runs(bids):
         runs = array('I')

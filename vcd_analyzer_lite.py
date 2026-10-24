@@ -3095,20 +3095,13 @@ def cmd_index(vcd, args):
         if same:
             sys.exit('Error: --output must not be the VCD file itself')
     auto = bool(getattr(args, 'auto', False))
-    lock = sidecar + '.lock'  # created by the spawner in --auto mode
-    token = os.environ.get('VCD_ANALYZER_INDEX_TOKEN') if auto else None
+    lock_fd = None
     if auto:
-        try:
-            with open(lock) as f:
-                owner = f.read().split()
-        except (OSError, IndexError):
-            owner = []
-        # Not our job anymore (stolen/recreated by another spawner): leave
-        # quietly without touching the new owner's lock or building.
-        if len(owner) < 2 or owner[1] != token:
+        # The background builder holds the OS lock for its own lifetime.
+        # A lost race (another builder grabbed it) exits quietly.
+        lock_fd = _acquire_build_lock(sidecar)
+        if lock_fd is None:
             sys.exit(0)
-        with open(lock, 'w') as f:  # adopt: alive PID is now ours
-            f.write('{} {}'.format(os.getpid(), token))
     try:
         if os.path.exists(target) and not (args.force or auto):
             sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
@@ -3123,11 +3116,8 @@ def cmd_index(vcd, args):
         if args.output:
             _link_sidecar(sidecar, target)
     finally:
-        if auto:
-            try:
-                os.unlink(lock)
-            except OSError:
-                pass
+        if lock_fd is not None:
+            os.close(lock_fd)  # releases the OS lock; the file is kept
     builder = stats.get('builder', 'python')
     r = {'file': args.file, 'sidecar': sidecar,
          'builder': builder,

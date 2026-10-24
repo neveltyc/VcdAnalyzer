@@ -400,6 +400,7 @@ struct Builder {
     block_bytes: u64,
     max_block_bytes: u64,
     first_time: Option<u64>,
+    saw_opener: bool,
 }
 
 impl Builder {
@@ -513,7 +514,14 @@ impl Builder {
     fn apply_fresh(&mut self, t: TokRef, class: Class) -> Result<(), String> {
         match class {
             Class::MarkerKnown => {}
-            Class::SectionOpen => self.drain_section()?,
+            Class::SectionOpen => {
+                // A section opener means byte-level split anchors may not
+                // be top-level: the merge falls back to a single-threaded
+                // rebuild when any worker saw one (zero extra I/O — the
+                // worker parses every byte anyway).
+                self.saw_opener = true;
+                self.drain_section()?;
+            }
             Class::Time(v) => {
                 if v < self.current {
                     die!("non-monotonic timestamps: index requires fallback");
@@ -671,17 +679,6 @@ pub fn build_from_manifest(
         .and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(64 << 20);
 
     let symtab = SymTab::new(&symbols);
-    // Soundness gate for parallel splitting (review F4): byte-level split
-    // anchors cannot know grammar context, so a '#T' inside a $comment body
-    // would be treated as a timestamp by the worker that starts there.
-    // Splitting is only sound when the data section contains NO section
-    // openers at all ('#' anchors are then timestamps or structural b/r/p
-    // operands, both handled). One cheap parallel byte scan decides.
-    let threads = if threads > 1 && section_openers_present(vcd_path, data_start, size0)? {
-        1
-    } else {
-        threads
-    };
     let mut splits: Vec<u64> = vec![data_start];
     if threads > 1 && size0.saturating_sub(data_start) >= parallel_min {
         for i in 1..threads {
@@ -706,6 +703,7 @@ pub fn build_from_manifest(
         first_time: Option<u64>,
         last_time: u64,
         max_block_bytes: u64,
+        saw_opener: bool,
     }
 
     let parse = |start: u64, end: u64| -> Result<WorkerOut, String> {
@@ -724,6 +722,7 @@ pub fn build_from_manifest(
             block_bytes,
             max_block_bytes: 0,
             first_time: None,
+            saw_opener: false,
         };
         b.run(end)?;
         Ok(WorkerOut {
@@ -732,6 +731,7 @@ pub fn build_from_manifest(
             postings: b.postings,
             last_time: b.current,
             max_block_bytes: b.max_block_bytes,
+            saw_opener: b.saw_opener,
         })
     };
 
@@ -751,6 +751,19 @@ pub fn build_from_manifest(
             }
         });
         workers = outs.into_iter().collect::<Result<Vec<_>, String>>()?;
+    }
+    // Soundness gate AFTER the fact (review F4, v2): byte-level split
+    // anchors cannot know grammar context — a '#T' inside a $comment body
+    // that spans a split point would be misread as a timestamp by the
+    // worker starting there. Workers parse every byte anyway, so each
+    // simply reports whether it saw a section opener; if any did, the
+    // parallel result is discarded and the fully context-aware
+    // single-threaded parse runs instead. Files without section openers
+    // (the common huge dump) keep the full parallel speed with ZERO extra
+    // I/O — no pre-scan.
+    if workers.iter().any(|w| w.saw_opener) && splits.len() > 2 {
+        workers.clear();
+        workers.push(parse(data_start, size0)?);
     }
 
     // -- merge ---------------------------------------------------------------
@@ -995,64 +1008,4 @@ fn find_timestamp_split(
 /// parse_int over a bare token (no leading '#' skip difference).
 fn parse_int_bytes(tok: &[u8]) -> Result<Option<u64>, String> {
     parse_int(tok)
-}
-
-/// True when the data section contains any '$X' token that is NOT a known
-/// marker ($end / $dump*) — i.e. a section opener exists somewhere, and
-/// byte-level split anchors can no longer be assumed top-level.
-fn section_openers_present(vcd_path: &str, start: u64, end: u64) -> Result<bool, String> {
-    let mut f = File::open(vcd_path).map_err(|e| format!("open: {}", e))?;
-    f.seek(SeekFrom::Start(start)).map_err(|e| format!("seek: {}", e))?;
-    let mut carry: Vec<u8> = Vec::new();
-    let mut pos = start;
-    let mut buf = vec![0u8; 1 << 22];
-    while pos < end {
-        let want = ((end - pos) as usize).min(buf.len());
-        let got = f.read(&mut buf[..want]).map_err(|e| format!("read: {}", e))?;
-        if got == 0 { break; }
-        let mut data = &buf[..got];
-        if !carry.is_empty() {
-            let mut joined = carry.clone();
-            joined.extend_from_slice(data);
-            // rescan the joined head once, then continue on the raw buffer
-            let cut = joined.len().saturating_sub(data.len());
-            let _ = cut;
-            if let Some(dollar) = scan_for_opener(&joined) {
-                return Ok(dollar);
-            }
-            carry.clear();
-            // skip the joined prefix we already validated (all but a tail
-            // that might end mid-token)
-            let skip = joined.len().saturating_sub(256);
-            data = &buf[skip.min(got)..got];
-            pos += skip as u64;
-        }
-        if let Some(dollar) = scan_for_opener(data) {
-            return Ok(dollar);
-        }
-        // keep a tail that may end mid-token for the next round
-        let tail = data.len().saturating_sub(256);
-        carry.extend_from_slice(&data[tail..]);
-        pos += (data.len() - tail) as u64;
-    }
-    if !carry.is_empty() {
-        if let Some(dollar) = scan_for_opener(&carry) {
-            return Ok(dollar);
-        }
-    }
-    Ok(false)
-}
-
-fn scan_for_opener(data: &[u8]) -> Option<bool> {
-    let mut i = 0usize;
-    while i < data.len() {
-        if is_ws(data[i]) { i += 1; continue; }
-        let s = i;
-        while i < data.len() && !is_ws(data[i]) { i += 1; }
-        let tok = &data[s..i];
-        if tok.first() == Some(&b'$') && !is_known_marker(tok) {
-            return Some(true);
-        }
-    }
-    None
 }

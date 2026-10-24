@@ -40,6 +40,12 @@ ENTRY = {
     3: (struct.Struct('<HH'), 4, True),
 }
 
+class _CorruptSidecarError(RuntimeError):
+    """The sidecar failed an on-demand integrity check (e.g. a posting
+    names a block beyond the table). Callers fall back to the plain
+    parser for the affected query instead of surfacing the error."""
+
+
 def _pread(fd, size, offset):
     """os.pread for both worlds. POSIX has the atomic positional read;
     Windows gets seek+read, which is equivalent here: every fd in this
@@ -303,6 +309,7 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
     # sidecar whose fresh-claiming header already matches (review P0-2).
     sidecar_tmp = str(sidecar) + '.tmp.{}'.format(os.getpid())
     out = open(sidecar_tmp, 'wb')
+    _published = False
     try:
         out.write(HEADER.pack(MAGIC, stat_after.st_size, stat_after.st_mtime_ns,
                               block_bytes, len(blocks), len(symbols), start))
@@ -321,9 +328,23 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
                 if len(buf) >= 1 << 20:
                     out.write(buf); buf.clear()
             out.write(buf)
-    finally:
         out.close()
-    os.replace(sidecar_tmp, sidecar)
+        os.replace(sidecar_tmp, sidecar)
+        _published = True
+    finally:
+        if not _published:
+            # Builder-owned cleanup (review finding C): a failed build —
+            # write error, publish error, anything — removes its OWN temp
+            # file; the published sidecar (if any) was never touched by
+            # this pass.
+            try:
+                out.close()
+            except OSError:
+                pass
+            try:
+                os.unlink(sidecar_tmp)
+            except OSError:
+                pass
     # Compare encodings WITHOUT pretending they are actual measured sidecars.
     membership_delta_bytes = 0
     membership_bitset_bytes = 0
@@ -476,6 +497,9 @@ class IndexedVCD(VCDParser):
             else: hi = mid
         if lo == 0: return None
         bid,second = entry.unpack_from(self.mapping, location+(lo-1)*size)
+        if bid >= len(self.blocks):
+            raise _CorruptSidecarError('posting names block {} of {}'.format(
+                bid, len(self.blocks)))
         return (min(block,second-1),None) if runs else (bid,second)
     def candidate_blocks(self, required, t0, t1, include_range=False):
         blocks = set()
@@ -495,6 +519,8 @@ class IndexedVCD(VCDParser):
                     else:hi=mid
                 while lo<count:
                     a,b=entry.unpack_from(self.mapping,location+lo*size)
+                    if a>=len(self.blocks) or b>len(self.blocks):
+                        raise _CorruptSidecarError('posting range {}-{} of {} blocks'.format(a,b,len(self.blocks)))
                     if a>last:break
                     a=max(a,first);b=min(b,last+1)
                     if a<b:ranges.add((a,b))
@@ -509,6 +535,8 @@ class IndexedVCD(VCDParser):
                 else:hi=mid
             while lo<count:
                 bid=entry.unpack_from(self.mapping,location+lo*size)[0]
+                if bid>=len(self.blocks):
+                    raise _CorruptSidecarError('posting names block {} of {}'.format(bid,len(self.blocks)))
                 if t1 is not None and self.blocks[bid][2]>t1:break
                 blocks.add(bid);lo+=1
         for a,b in ranges:blocks.update(range(a,b))
@@ -531,7 +559,7 @@ class IndexedVCD(VCDParser):
             if kind=='value':
                 assert record_sym==sym,(record_sym,sym)
                 return val
-        raise AssertionError('indexed record missing')
+        raise _CorruptSidecarError('indexed record missing')
     def point_values(self, bid, entries):
         """Resolve several same-block pointer postings by in-place record decode.
 
@@ -592,10 +620,10 @@ class IndexedVCD(VCDParser):
         def ident(pos):
             t,q=token(pos)
             if t is None:return None,None
-            if t!=sym:raise AssertionError('posting offset mismatch',{ 'at':t,'want':sym})
+            if t!=sym:raise _CorruptSidecarError('posting offset mismatch: {} != {}'.format(t,sym))
             return t,q
         if c0 in '01xXzZ':
-            if tok[1:]!=sym:raise AssertionError('posting offset mismatch',{'at':tok[1:],'want':sym})
+            if tok[1:]!=sym:raise _CorruptSidecarError('posting offset mismatch: {} != {}'.format(tok[1:],sym))
             return c0.lower()
         if c0 in 'bB':
             t2,q=ident(p)
@@ -614,7 +642,7 @@ class IndexedVCD(VCDParser):
             t4,q4=ident(q3)
             if t4 is None:return None
             return ''.join(_PORT_STATE[c] for c in tok[1:])
-        raise AssertionError('posting offset not at a value record',{ 'tok':tok,'want':sym})
+        raise _CorruptSidecarError('posting offset not at a value record: {} != {}'.format(tok,sym))
     def raw_at(self, t, required, pointers=True):
         if t<0 or not required:return {}
         complete=bisect.bisect_right(self.ends,t)-1
@@ -678,7 +706,11 @@ class IndexedVCD(VCDParser):
             # the reference implementation; results stay identical.
             self.counters['gate_rejected']=True
             return super().state_at(t_at,sids)
-        return self.fold_raw(self.raw_at(t_at,self.selected_raw(sids),pointers),sids)
+        try:
+            return self.fold_raw(self.raw_at(t_at,self.selected_raw(sids),pointers),sids)
+        except _CorruptSidecarError:
+            self.counters['corrupt_fallback']=True
+            return super().state_at(t_at,sids)
     def state_pair(self,ta,tb,sids=None):
         return self.state_at(ta,sids),self.state_at(tb,sids)
     def _iter_changes(self,t0=0,t1=None,sids=None):
@@ -688,7 +720,12 @@ class IndexedVCD(VCDParser):
             return
         required=self.selected_raw(sids)
         if not required:return
-        candidates=self.candidate_blocks(required,t0,t1,include_range=bool(self._bit_state_template))
+        try:
+            candidates=self.candidate_blocks(required,t0,t1,include_range=bool(self._bit_state_template))
+        except _CorruptSidecarError:
+            self.counters['corrupt_fallback']=True
+            yield from super()._iter_changes(t0,t1,sids)
+            return
         # When all of the file is relevant, its existing split-based scanner
         # is faster than the experimental position-aware decoder.
         if t0==0 and t1 is None and sum(self.blocks[b][1]-self.blocks[b][0] for b in candidates)>=0.8*(self.file_size-self.begin_offset):
@@ -894,50 +931,64 @@ def _writer_holds(vcd_path):
     return None
 
 
-def _lock_stale(lock, max_age=3600.0):
-    """True when the build lock's owner is gone (dead pid / ancient)."""
-    try:
-        with open(lock) as f:
-            pid = int(f.read().split()[0] or 0)
-        if pid and pid != os.getpid():
-            if sys.platform != 'win32':
-                try:
-                    os.kill(pid, 0)
-                    return False  # alive and building
-                except ProcessLookupError:
-                    return True
-                except PermissionError:
-                    return False  # alive (owned by another user)
-        age = time.time() - os.stat(lock).st_mtime
-        return age > max_age
-    except (OSError, ValueError):
-        return True
+def _lock_fd(fd):
+    """Exclusive non-blocking OS lock (flock on POSIX, msvcrt on Windows).
+    Released automatically when the fd closes OR the process dies — the
+    lock's lifetime is the build process's lifetime by construction."""
+    if sys.platform == 'win32':
+        import msvcrt
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def _acquire_build_lock(sidecar):
-    """Create the single-flight lock; content is 'pid token'. The token
-    stays with the build job across the spawner->builder handoff, so a
-    dead spawner PID cannot get the lock stolen while its builder still
-    runs, and a builder only releases a lock it still owns."""
+    """Single-flight build lock held on an OPEN FILE DESCRIPTOR.
+
+    Exclusion is the OS file lock, not the file's existence or contents:
+    a dead builder releases automatically (no pid parsing, no stale
+    heuristics — an empty or ancient lock file is harmless), and the
+    pid is written for humans only. Returns the fd to hold for the
+    build's duration, or None when another builder holds the lock.
+    The lock file itself persists (a few bytes); unlinking it would
+    re-introduce an unlink/lock race, so it is deliberately kept.
+    """
     lock = sidecar + '.lock'
-    token = '%x' % os.urandom(8).hex()[0:16].__len__() if False else os.urandom(8).hex()
-    for _attempt in (0, 1):
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, 'w') as f:
-                f.write('{} {}'.format(os.getpid(), token))
-            return lock
-        except FileExistsError:
-            if _attempt == 0 and _lock_stale(lock):
-                try:
-                    os.unlink(lock)
-                    continue
-                except OSError:
-                    pass
-            return None
-        except OSError:
-            return None  # unwritable directory: cannot lock, cannot build
-    return None
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, 'O_BINARY', 0),
+                 0o600)
+    try:
+        _lock_fd(fd)
+    except OSError:
+        os.close(fd)  # held: another builder owns the build
+        return None
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, ('pid %d\n' % os.getpid()).encode())
+    except OSError:
+        pass  # informational only; exclusion never depends on it
+    return fd
+
+
+def _build_in_progress(sidecar):
+    """True when a builder currently holds the lock (probe with an
+    immediately-released fd; an unopenable lock counts as busy)."""
+    lock = sidecar + '.lock'
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, 'O_BINARY', 0),
+                     0o600)
+    except OSError:
+        return True
+    try:
+        _lock_fd(fd)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)  # releases if the probe held it
 
 
 def maybe_auto_build(parser, vcd_path):
@@ -982,34 +1033,25 @@ def maybe_auto_build(parser, vcd_path):
               '(rerun after the dump completes)'.format(vcd_path, held),
               cat='index_writer_holds:' + vcd_path)
         return
-    lock = _acquire_build_lock(sidecar)
-    if lock is None:
-        return  # another builder owns it, or the directory is unwritable
+    if _build_in_progress(sidecar):
+        return  # a builder is already running for this file
     log = None
     try:
         try:
             log = open(sidecar + '.log', 'a')
         except OSError:
             log = None
-        with open(lock) as f:
-            token = f.read().split()[1]
-        env = dict(os.environ)
-        env['VCD_ANALYZER_INDEX_TOKEN'] = token
         subprocess.Popen(
             [sys.executable, _AUTO_SCRIPT_PATH, 'index', vcd_path, '--auto'],
             stdout=log if log is not None else subprocess.DEVNULL,
             stderr=subprocess.STDOUT if log is not None else subprocess.DEVNULL,
-            start_new_session=True, close_fds=True, env=env)
+            start_new_session=True, close_fds=True)
         _warn('{}: building index in the background '
               '(VCD_ANALYZER_AUTO_INDEX=0 disables)'.format(vcd_path),
               cat='index_autobuild:' + vcd_path)
     except OSError as error:
         _warn('{}: background index build failed to start: {}'.format(
             vcd_path, error), cat='index_autobuild')
-        try:
-            os.unlink(lock)
-        except OSError:
-            pass
     finally:
         if log is not None:
             log.close()

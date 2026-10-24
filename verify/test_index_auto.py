@@ -75,12 +75,15 @@ def test_auto_build_spawn(tmp_path):
             break
         time.sleep(0.1)
     assert sidecar.exists(), 'background build never produced the sidecar'
-    # the lock must be gone once the builder finishes
+    # once the builder finishes, the OS lock is released: we can take it
+    fd = None
     for _ in range(100):
-        if not os.path.exists(str(sidecar) + '.lock'):
+        fd = va._acquire_build_lock(str(sidecar))
+        if fd is not None:
             break
         time.sleep(0.1)
-    assert not os.path.exists(str(sidecar) + '.lock')
+    assert fd is not None, 'builder never released the lock'
+    os.close(fd)
 
 
 def test_auto_build_kill_switch(tmp_path, monkeypatch):
@@ -105,35 +108,29 @@ def test_auto_build_skipped_for_live_writer(tmp_path):
     assert not va._sidecar_fresh(src, va.sidecar_path(src))
 
 
-def test_lock_dead_owner_reclaimed(tmp_path):
-    """A lock whose owner PID is gone and whose mtime is ancient is
-    reclaimed by _acquire_build_lock itself — no manual unlink."""
+def test_lock_single_flight_and_death_release(tmp_path):
+    """OS-file-lock semantics: a held lock refuses second builders; a DEAD
+    builder's lock is released by the OS (no pid parsing, no stale-file
+    heuristics — an empty/garbage lock file is harmless)."""
     src = _big_vcd(tmp_path)
     sidecar = va.sidecar_path(src)
-    lock = sidecar + '.lock'
-    with open(lock, 'w') as f:
-        f.write('999999999')  # not a live PID
-    old = time.time() - 7200
-    os.utime(lock, (old, old))
-    got = va._acquire_build_lock(sidecar)
-    assert got == lock  # reclaimed on the first attempt, in-function
-    os.unlink(got)
+    fd = va._acquire_build_lock(sidecar)
+    assert fd is not None
+    try:
+        assert va._acquire_build_lock(sidecar) is None  # second: refused
+    finally:
+        os.close(fd)  # death/release
+    fd2 = va._acquire_build_lock(sidecar)
+    assert fd2 is not None  # released on close
+    os.close(fd2)
+    # an EMPTY lock file (crash between create and write) is harmless
+    Path(sidecar + '.lock').write_bytes(b'')
+    fd3 = va._acquire_build_lock(sidecar)
+    assert fd3 is not None
+    os.close(fd3)
 
 
-def test_lock_single_flight(tmp_path):
-    src = _big_vcd(tmp_path)
-    sidecar = va.sidecar_path(src)
-    lock = va._acquire_build_lock(sidecar)
-    assert lock is not None
-    assert va._acquire_build_lock(sidecar) is None  # second builder: refused
-    # a dead owner's lock is reclaimed
-    with open(lock, 'w') as f:
-        f.write('999999999')
-    os.utime(lock, (time.time() - 7200, time.time() - 7200))
-    os.unlink(lock)
-    lock2 = va._acquire_build_lock(sidecar)
-    assert lock2 is not None
-    os.unlink(lock2)
+
 
 
 def test_writer_held_detected(tmp_path):

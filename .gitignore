@@ -10,5 +10,6 @@ coverage.xml
 
 # Private dev files
 AGENT.md
+AGENTS.md
 GIT_SOP.md
 build/

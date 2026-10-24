@@ -40,6 +40,16 @@ ENTRY = {
     3: (struct.Struct('<HH'), 4, True),
 }
 
+def _pread(fd, size, offset):
+    """os.pread for both worlds. POSIX has the atomic positional read;
+    Windows gets seek+read, which is equivalent here: every fd in this
+    module is consumed by exactly one single-threaded reader."""
+    if hasattr(os, 'pread'):
+        return os.pread(fd, size, offset)
+    os.lseek(fd, offset, os.SEEK_SET)
+    return os.read(fd, size)
+
+
 class PositionedToken(str):
     def __new__(cls, value, offset):
         obj = str.__new__(cls, value)
@@ -53,7 +63,7 @@ def tokens(fd, start, end, counters=None, chunk_size=1 << 20):
     carry = b''
     base = start
     while position < end:
-        chunk = os.pread(fd, min(chunk_size, end-position), position)
+        chunk = _pread(fd, min(chunk_size, end-position), position)
         if not chunk:
             break
         if counters is not None:
@@ -514,7 +524,7 @@ class IndexedVCD(VCDParser):
             lo=targets[i][0];hi=lo;j=i
             while j<n and targets[j][0]-lo<=self.POINT_GROUP_SPAN:
                 hi=targets[j][0];j+=1
-            buf=os.pread(self.fd,min(hi-lo+512,end-lo),lo)
+            buf=_pread(self.fd,min(hi-lo+512,end-lo),lo)
             self.counters['reads'] += 1
             self.counters['bytes'] += len(buf)
             while i<j:

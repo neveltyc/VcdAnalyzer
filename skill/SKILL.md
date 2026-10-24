@@ -7,18 +7,20 @@ description: VCD waveform analysis for RTL debug. Use when the user has a .vcd f
 
 ## What this tool does
 
-`vcd_analyzer.py` is a single-file, zero-dependency Python CLI that parses IEEE 1364 VCD files and exposes seven query commands. It streams value changes, handles QuestaSim bit-exploded buses and Extended VCD port states, and applies resource limits to malformed/hostile inputs.
+`vcd_analyzer.py` is a single-file, zero-dependency Python CLI that parses IEEE 1364 VCD files and exposes eight commands. It streams value changes, handles QuestaSim bit-exploded buses and Extended VCD port states, and applies resource limits to malformed/hostile inputs.
 
 All commands support `--json` for structured output. **Always use `--json` when calling from an agent.**
 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.6/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.5.6
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.0
 ```
 
-No pip install, no virtualenv, no dependencies. Python 3.9+.
+No pip install, no virtualenv, no dependencies. Python 3.9+. (A
+`vcd_analyzer_lite.py` pure-Python build exists; the file above is the
+full variant with the index feature.)
 
 ## Decision tree: which command to use
 
@@ -41,6 +43,11 @@ User wants to know...
 │       ├─ interval   → time ranges where condition is true (no --show)
 │       ├─ segment    → intervals + observed signal values (with --show)
 │       └─ event      → per-transition snapshots (with a changed(SIG) term)
+└─ "This dump is GB-scale and I will query it repeatedly"
+    └─ index          → build the .vcidx sidecar once (or let the first
+                        query build it in the background); all later
+                        queries are instant. Transparent: output is
+                        identical, only faster.
 ```
 
 ## Command reference
@@ -130,7 +137,22 @@ python3 vcd_analyzer.py --json compare <file> --at T1,T2 [--filter K1,K2]
 
 Key JSON fields: `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`. Only signals whose value differs are included.
 
-### 7. search — condition-based query (three modes)
+### 7. index — build the acceleration sidecar (full variant)
+
+```bash
+python3 vcd_analyzer.py index <file> [--block-mib 8] [--force] [--output PATH]
+```
+
+Builds `<file>.vcidx`. Every query command then uses it automatically when
+fresh — output unchanged, big-dump point queries become sub-second. If you
+never run it, the first query on a big file starts a background build by
+itself (`VCD_ANALYZER_AUTO_INDEX=0` disables; on platforms without an
+embedded native builder automatic builds are off by default — run `index`
+explicitly, which reports the slower pure-Python mechanism). Rebuild is
+skipped with a message while the dump still looks open for writing. Key JSON fields:
+`builder`, `index_bytes`, `blocks`, `build_s`.
+
+### 8. search — condition-based query (three modes)
 
 This is the most powerful command. Mode is selected by which options are present:
 
@@ -255,8 +277,12 @@ For exceptionally large VCD files, tune resource limits:
 | `VCD_ANALYZER_MAX_VARS` | 1,000,000 | Max `$var` declarations |
 | `VCD_ANALYZER_MAX_REASSEMBLE_BITS` | 65,536 | Max bits per bit-exploded bus |
 | `VCD_ANALYZER_MAX_DATA_TOKEN_LEN` | 1,048,576 | Max characters per header or data token |
+| `VCD_ANALYZER_AUTO_INDEX` | 1 | `0` disables background index building |
+| `VCD_ANALYZER_NO_INDEX` | unset | `1` never uses index sidecars |
+| `VCD_ANALYZER_INDEX_THREADS` | min(4, cores) | Native index-build thread cap |
 
-Increase if the tool reports `too many $var declarations` or `bit-exploded group has more than N bits`.
+Increase the resource limits if the tool reports `too many $var declarations`
+or `bit-exploded group has more than N bits`.
 
 ---
 

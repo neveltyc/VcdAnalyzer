@@ -3,7 +3,43 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
-## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
+## [1.6.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.0) - 2026-10-25
+
+### Added
+
+- Index sidecar for huge dumps (full variant): `vcd_analyzer index <file>` builds an optional
+  `<file>.vcidx`; every query command then uses it automatically with identical output — on a
+  10.31 GiB dump, a fresh-process snapshot drops from 91 s to 0.27 s. A query that finds no
+  sidecar starts a background build by itself (one per file); a source that looks
+  still-open-for-write is reported and left alone.
+- Native multi-core index builder embedded in the single file: prebuilt libraries for
+  arm64/x86-64 Linux (glibc >= 2.17), arm64 macOS and x86-64 Windows, loaded through a C ABI
+  and checksum-verified; the 10.31 GiB index builds in ~5 s with 4 threads. Platforms without
+  an embedded library fall back to the pure-Python builder automatically.
+- `index --output PATH` stores the sidecar elsewhere (PATH must end with `.vcidx`) and links
+  `<file>.vcidx` to it.
+- `vcd_analyzer_lite.py`: the pure-Python build with the 1.5.6 behavior — same queries, no
+  index feature; index attempts answer with a clear pointer to the full file.
+- Environment: `VCD_ANALYZER_AUTO_INDEX`, `VCD_ANALYZER_NO_INDEX`,
+  `VCD_ANALYZER_INDEX_THREADS`.
+
+### Changed
+
+- Both release files are generated from the `src/` module directory by `_make.py`; CI rejects
+  a release file that drifts from it.
+- Sidecar freshness is `(size, mtime_ns)` recorded at build time — O(1) per query, no content
+  hashing.
+
+### Fixed
+
+- Index builds and sidecar handling are hardened across the board: atomic publication,
+  clean fallback to the plain parser on truncated or corrupt sidecars, no file-descriptor
+  leaks, single-flight background builds via an OS file lock, and indexed results proven
+  identical to the plain parser on the parser's full torture corpus — including malformed
+  timestamps, adversarial encodings and hostile inputs that previously could corrupt a
+  multi-threaded build.
+
+## [1.5.6]## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
 
 ### Fixed
 

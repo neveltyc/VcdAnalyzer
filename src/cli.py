@@ -1,5 +1,5 @@
 # ================================================================
-# Part 8: CLI entry
+# Part 9: CLI entry
 # ================================================================
 
 
@@ -41,6 +41,14 @@ def main():
                    help='show extra fields; if --limit is omitted, disables truncation')
     p.add_argument('--version', action='version', version='%(prog)s ' + __version__)
     sub = p.add_subparsers(dest='cmd', metavar='<command>')
+
+    sp = sub.add_parser('index', help='build the optional .vcidx sidecar for fast random access')
+    sp.add_argument('file', metavar='<file>')
+    sp.add_argument('--block-mib', type=int, default=8, metavar='N',
+                    help='index block size in MiB (default 8)')
+    sp.add_argument('--force', action='store_true',
+                    help='rebuild even if the sidecar already exists')
+    _add_common(sp)
 
     sp = sub.add_parser('info', help='file overview: timescale, signal count, time span, scopes')
     sp.add_argument('file', metavar='<file>', help='VCD file path'); _add_common(sp)
@@ -89,15 +97,23 @@ def main():
                  '--condition "changed({})"'.format(args.changed))
 
     try:
-        vcd = VCDParser(args.file)
-        if vcd.timescale_warning:
-            try:
-                sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
-            except (OSError, ValueError):
-                pass
         cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
-                'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search}
-        cmds[args.cmd](vcd, args)
+                'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search,
+                'index': cmd_index}
+        # The index only accelerates reads; a missing/stale/rejected
+        # sidecar silently keeps the plain parser (one warning at most).
+        vcd = try_index(args.file) or VCDParser(args.file)
+        try:
+            if vcd.timescale_warning:
+                try:
+                    sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
+                except (OSError, ValueError):
+                    pass
+            cmds[args.cmd](vcd, args)
+        finally:
+            close = getattr(vcd, 'close', None)
+            if close is not None:
+                close()
     except FileNotFoundError as e:
         sys.exit('Error: cannot open VCD file: {}'.format(e.filename or args.file))
     except IsADirectoryError as e:

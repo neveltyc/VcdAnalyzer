@@ -1,0 +1,18 @@
+[package]
+name = "vcdidx"
+version = "0.1.0"
+edition = "2021"
+description = "Fast VCD block-index builder for vcd_analyzer (lib + CLI)"
+
+[lib]
+name = "vcdidx"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "vcdidx"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+strip = true

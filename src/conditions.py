@@ -1,5 +1,5 @@
 # ================================================================
-# Part 5: Condition system and stream grouping
+# Part 6: Condition system and stream grouping
 # ================================================================
 
 def _parse_target_value(text):

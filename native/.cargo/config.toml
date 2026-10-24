@@ -1,0 +1,5 @@
+# Windows: strip at link time (GNU ld -s keeps the export table used by
+# GetProcAddress/ctypes but drops debug/symtab bulk). Do NOT apply -s on
+# macOS, where it would strip exported symbols too.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-Wl,-s"]

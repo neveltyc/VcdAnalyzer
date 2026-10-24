@@ -1,6 +1,47 @@
 # ================================================================
-# Part 7: Commands
+# Part 8: Commands
 # ================================================================
+
+def cmd_index(vcd, args):
+    """Build the optional .vcidx sidecar for fast random access.
+
+    Explicit by design: queries never write. The fast distribution
+    variant builds via its embedded native library; the standard file
+    uses the pure-Python pass (identical sidecar semantics, slower).
+    """
+    sidecar = sidecar_path(args.file)
+    if os.path.exists(sidecar) and not args.force:
+        sys.exit('Error: {} already exists; use --force to rebuild'.format(sidecar))
+    block_bytes = args.block_mib << 20
+    try:
+        stats = build_index_best(args.file, sidecar, block_bytes)
+    except (ValueError, _VCDResourceError) as error:
+        sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+    builder = stats.get('builder', 'python')
+    r = {'file': args.file, 'sidecar': sidecar,
+         'builder': builder,
+         'build_s': round(stats.get('build_s', 0.0), 3),
+         'source_bytes': stats.get('source_bytes'),
+         'index_bytes': stats.get('index_bytes'),
+         'index_pct': round(100.0 * stats.get('index_bytes', 0)
+                            / max(1, stats.get('source_bytes', 1)), 4),
+         'blocks': stats.get('blocks'),
+         'raw_symbols': stats.get('raw_symbols'),
+         'signal_block_pairs': stats.get('signal_block_pairs')}
+    if args.json:
+        r['builder'] = builder
+        _json(r)
+        return
+    print('Built    : {}'.format(r['sidecar']))
+    print('Builder  : {}'.format(builder))
+    print('Source   : {:,} bytes'.format(r['source_bytes']))
+    print('Index    : {:,} bytes ({:.4f}%)'.format(r['index_bytes'], r['index_pct']))
+    print('Blocks   : {} x {} MiB'.format(r['blocks'], args.block_mib))
+    print('Symbols  : {} raw, {:,} signal-block pairs'.format(
+        r['raw_symbols'], r['signal_block_pairs']))
+    print('Time     : {:.3f}s'.format(r['build_s']))
+    print('Use      : queries pick this up automatically; VCD_ANALYZER_NO_INDEX=1 disables')
+
 
 def cmd_info(vcd, args):
     _limit(args)

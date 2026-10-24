@@ -11,3 +11,5 @@ coverage.xml
 # Private dev files
 AGENT.md
 GIT_SOP.md
+build/
+vcd_analyzer_fast.py

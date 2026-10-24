@@ -22,6 +22,8 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
   index feature; index attempts answer with a clear pointer to the full file.
 - Environment: `VCD_ANALYZER_AUTO_INDEX`, `VCD_ANALYZER_NO_INDEX`,
   `VCD_ANALYZER_INDEX_THREADS`.
+- Python 3.8 compatibility: the supported floor drops from 3.9 to 3.8 (CI
+  now tests 3.8 explicitly).
 
 ### Changed
 

@@ -3,7 +3,7 @@
 #      src/-derived head/tail plus a structural check of the embedded
 #      native part — the blobs need the Rust toolchain, so they are
 #      checked structurally)
-#   2. the full suite passes on the oldest (3.9) and newest supported
+#   2. the full suite passes on the oldest (3.8) and newest supported
 #      Python of each release-critical platform, Windows included: the
 #      full variant's embedded native builder is exercised for real on
 #      every matrix leg that has a matching library
@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  python: '3.9'  }
+          - { os: ubuntu-latest,  python: '3.8'  }
           - { os: ubuntu-latest,  python: '3.13' }
           - { os: macos-latest,   python: '3.13' }
           - { os: windows-latest, python: '3.13' }

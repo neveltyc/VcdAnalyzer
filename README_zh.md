@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="Version" src="https://img.shields.io/badge/版本-1.6.0-3366cc?style=flat-square">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.8+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
 
@@ -63,7 +63,7 @@ python vcd_analyzer.py index sim.vcd
 
 ## 安装：完整版或精简版
 
-两个单文件，零依赖，Python 3.9+。
+两个单文件，零依赖，Python 3.8+。
 
 | | **完整版** `vcd_analyzer.py`（默认） | **精简版** `vcd_analyzer_lite.py` |
 |:--|:--|:--|
@@ -71,7 +71,7 @@ python vcd_analyzer.py index sim.vcd
 | 巨型文件的索引加速 | ✅ 自动构建、自动使用 | ❌ `index` 命令明确提示改用完整版 |
 | 多核原生索引构建器 | ✅ 内嵌（arm64/x86-64 Linux、arm64 macOS、x86-64 Windows） | 纯 Python |
 | 文件大小 | 约 1.6 MB | 约 180 KB |
-| 环境要求 | Python 3.9+（Linux 需 glibc ≥ 2.17） | Python 3.9+ |
+| 环境要求 | Python 3.8+（Linux 需 glibc ≥ 2.17） | Python 3.8+ |
 
 ```bash
 # 最新版（完整版）
@@ -86,7 +86,7 @@ curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_ana
 python vcd_analyzer.py --version
 ```
 
-无需 pip、无需虚拟环境、无需 PyPI。只要有 curl 和 Python 3.9+ 就能用——适合 CI 容器、EDA 服务器、Docker 构建、Agent 工具链。
+无需 pip、无需虚拟环境、无需 PyPI。只要有 curl 和 Python 3.8+ 就能用——适合 CI 容器、EDA 服务器、Docker 构建、Agent 工具链。
 
 ## 命令一览
 
@@ -174,7 +174,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 两个版本都是单文件、零第三方 Python 依赖。完整版额外内嵌压缩的原生构建库，
 运行时经 C ABI 加载，平台不匹配时自动回退纯 Python。不需要 `pip install`，
-不需要虚拟环境——随便放到 Python 3.9+ 环境里就能跑。
+不需要虚拟环境——随便放到 Python 3.8+ 环境里就能跑。
 
 ## 项目结构
 
@@ -187,7 +187,7 @@ native/               Rust 索引构建器 crate + 交叉编译脚本
 verify/               pytest + unittest 测试套件
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
-.github/workflows/    CI：两个发行文件必须与 src/ 一致，3.9-3.13 测试
+.github/workflows/    CI：两个发行文件必须与 src/ 一致，3.8-3.13 测试
 CHANGELOG.md          简洁变更日志，含详细发行说明链接
 ```
 
@@ -202,7 +202,7 @@ python _make.py        # 重建 vcd_analyzer.py 与 vcd_analyzer_lite.py
 ```
 
 CI 会拒绝发行文件与 `src/` 不一致的提交，并在每次 push 时跑全量测试
-（Linux/macOS/Windows，Python 3.9-3.13）；本地先跑测试是可选的。
+（Linux/macOS/Windows，Python 3.8-3.13）；本地先跑测试是可选的。
 只有 `_preamble.py` 可以包含模块级 import——各部分共享同一个命名空间。
 
 ## 测试

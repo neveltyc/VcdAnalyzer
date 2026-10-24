@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_ana
 python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.0
 ```
 
-No pip install, no virtualenv, no dependencies. Python 3.9+. (A
+No pip install, no virtualenv, no dependencies. Python 3.8+. (A
 `vcd_analyzer_lite.py` pure-Python build exists; the file above is the
 full variant with the index feature.)
 

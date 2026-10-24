@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="Version" src="https://img.shields.io/badge/version-1.6.0-3366cc?style=flat-square">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.8+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
 
@@ -67,7 +67,7 @@ python vcd_analyzer.py index sim.vcd
 
 ## Install: full or lite
 
-Two single files, no dependencies, Python 3.9+.
+Two single files, no dependencies, Python 3.8+.
 
 | | **full** — `vcd_analyzer.py` (default) | **lite** — `vcd_analyzer_lite.py` |
 |:--|:--|:--|
@@ -75,7 +75,7 @@ Two single files, no dependencies, Python 3.9+.
 | Index sidecar acceleration for huge dumps | ✅ built and used automatically | ❌ `index` answers with a pointer to the full file |
 | Native multi-core index builder | ✅ embedded (arm64/x86-64 Linux, arm64 macOS, x86-64 Windows) | pure Python only |
 | File size | ~1.6 MB | ~180 KB |
-| Requirements | Python 3.9+ (Linux needs glibc ≥ 2.17) | Python 3.9+ |
+| Requirements | Python 3.8+ (Linux needs glibc ≥ 2.17) | Python 3.8+ |
 
 ```bash
 # Latest (full)
@@ -90,7 +90,7 @@ curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_ana
 python vcd_analyzer.py --version
 ```
 
-No pip, no venv, no PyPI. Works anywhere curl and Python 3.9+ are available — CI containers, EDA servers, Docker builds, agent toolchains.
+No pip, no venv, no PyPI. Works anywhere curl and Python 3.8+ are available — CI containers, EDA servers, Docker builds, agent toolchains.
 
 ## Commands
 
@@ -193,7 +193,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ## Single file, zero dependencies
 
 `vcd_analyzer.py` is pure Python with no third-party imports. No pip install, no virtualenv
-ritual &mdash; drop it anywhere with Python 3.9+ and it works.
+ritual &mdash; drop it anywhere with Python 3.8+ and it works.
 
 ## Project layout
 
@@ -206,7 +206,7 @@ native/               Rust index-builder crate + cross-build script (cargo-zigbu
 verify/               pytest + unittest test suite
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
-.github/workflows/    CI: both release files must match src/, tests on 3.9-3.13
+.github/workflows/    CI: both release files must match src/, tests on 3.8-3.13
 CHANGELOG.md          Compact changelog with links to detailed release notes
 ```
 
@@ -222,7 +222,7 @@ python _make.py        # rebuild vcd_analyzer.py + vcd_analyzer_lite.py
 
 CI rejects any commit where a release file differs from a fresh assembly of
 `src/`, and runs the full test suite on every push (Linux/macOS/Windows,
-Python 3.9-3.13) — running it locally first is optional. Only `_preamble.py`
+Python 3.8-3.13) — running it locally first is optional. Only `_preamble.py`
 may contain module-level imports — the parts
 share one namespace by concatenation, and `_make.py --check` enforces this.
 

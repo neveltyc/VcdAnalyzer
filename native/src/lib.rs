@@ -829,6 +829,17 @@ pub fn build_from_manifest(
     let tmp_path = format!("{}.tmp.{}", sidecar_path, std::process::id());
     let threads_used = splits.len() - 1;
     let out = File::create(&tmp_path).map_err(|e| format!("create sidecar: {}", e))?;
+    // Builder-owned cleanup (review finding C): the temp file is removed
+    // unless the rename below publishes it.
+    struct TempGuard<'a> { path: &'a str, armed: bool }
+    impl Drop for TempGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = std::fs::remove_file(self.path);
+            }
+        }
+    }
+    let mut guard = TempGuard { path: &tmp_path, armed: true };
     let mut w = BufWriter::with_capacity(1 << 20, out);
     let io = |e: std::io::Error| format!("write: {}", e);
     w.write_all(b"VCDIDX02").map_err(io)?;
@@ -865,6 +876,7 @@ pub fn build_from_manifest(
     w.flush().map_err(io)?;
     drop(w);
     std::fs::rename(&tmp_path, sidecar_path).map_err(|e| format!("publish sidecar: {}", e))?;
+    guard.armed = false;
     let index_bytes = std::fs::metadata(sidecar_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(format!(

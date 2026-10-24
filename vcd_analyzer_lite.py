@@ -1984,7 +1984,7 @@ def try_index(vcd_path):
     for var in ('VCD_ANALYZER_AUTO_INDEX', 'VCD_ANALYZER_INDEX_THREADS'):
         if os.environ.get(var):
             _warn('{} is a full-version option and is ignored by this '
-                  'lite build'.format(var), cat='index_fast_only_' + var)
+                  'lite build'.format(var), cat='index_full_only_' + var)
     return None
 
 

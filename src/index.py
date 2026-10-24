@@ -124,6 +124,10 @@ def items(parser, fd, start, end, initial_time=0, counters=None, chunk_size=1 <<
                     break
             continue
         if c0 == '#' and len(token) > 1 and token[1].isdigit():
+            # NOTE (known divergence): Python's int() accepts non-ASCII
+            # digits ('#٥' -> 5) while the native builder is ASCII-only;
+            # such adversarial tokens can therefore be indexed differently
+            # by the two builders. ASCII-digit files are unaffected.
             value = _parse_vcd_timestamp_token(token)
             if value is None:
                 # Tolerated malformed timestamp (e.g. '#1.5'): the reference

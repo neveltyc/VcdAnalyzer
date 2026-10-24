@@ -105,6 +105,21 @@ def test_auto_build_skipped_for_live_writer(tmp_path):
     assert not va._sidecar_fresh(src, va.sidecar_path(src))
 
 
+def test_lock_dead_owner_reclaimed(tmp_path):
+    """A lock whose owner PID is gone and whose mtime is ancient is
+    reclaimed by _acquire_build_lock itself — no manual unlink."""
+    src = _big_vcd(tmp_path)
+    sidecar = va.sidecar_path(src)
+    lock = sidecar + '.lock'
+    with open(lock, 'w') as f:
+        f.write('999999999')  # not a live PID
+    old = time.time() - 7200
+    os.utime(lock, (old, old))
+    got = va._acquire_build_lock(sidecar)
+    assert got == lock  # reclaimed on the first attempt, in-function
+    os.unlink(got)
+
+
 def test_lock_single_flight(tmp_path):
     src = _big_vcd(tmp_path)
     sidecar = va.sidecar_path(src)

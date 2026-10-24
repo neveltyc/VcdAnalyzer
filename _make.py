@@ -17,7 +17,7 @@ The module order matches the Part numbering in the assembled file:
                              change stream)  (syncs with OpenWaveAnalyzer)
     index_stub.py   Part 4:  index-sidecar stub — the STANDARD build keeps
                              1.5.6 pure-Python behavior; index attempts get
-                             a clear "fast variant only" error
+                             a clear "full variant only" error
     (the FAST build, _make.py --fast, puts index.py in this slot instead:
     the .vcidx reader, native/pure builders, usage gate, auto-build)
     output.py       Part 5:  JSON/text output helpers, limits, truncation
@@ -198,11 +198,13 @@ def _load_native_library():
         if sys.platform.startswith('linux'):
             # memfd + dlopen: the library never touches the filesystem.
             try:
-                fd = os.memfd_create('vcdidx', 0)
-                os.write(fd, _verified_bytes() or b'')
-                os.lseek(fd, 0, os.SEEK_SET)
-                lib = ctypes.CDLL('/proc/self/fd/{}'.format(fd))
-                _native_keep_open.append(fd)  # mapping lives with the fd
+                blob = _verified_bytes()
+                if blob is not None:
+                    fd = os.memfd_create('vcdidx', 0)
+                    os.write(fd, blob)
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    lib = ctypes.CDLL('/proc/self/fd/{}'.format(fd))
+                    _native_keep_open.append(fd)  # mapping lives with the fd
             except (AttributeError, OSError, ValueError):
                 lib = None  # fall through to the disk path
         if lib is None:
@@ -218,7 +220,7 @@ def _load_native_library():
                 raw = _verified_bytes()
                 if raw is None:
                     return None
-                os.makedirs(cache_dir, exist_ok=True)
+                os.makedirs(cache_dir, exist_ok=True, mode=0o700)
                 fd, tmp = tempfile.mkstemp(dir=cache_dir, suffix='.part')
                 try:
                     with os.fdopen(fd, 'wb') as out:

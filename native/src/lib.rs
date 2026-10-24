@@ -279,6 +279,8 @@ fn is_known_marker(b: &[u8]) -> bool {
 
 /// Python int(tok[1:]): digits, single underscores between digit runs only.
 /// None = malformed (tolerated skip); Err = fatal (length / int64 caps).
+/// Known divergence: Python's int() also accepts non-ASCII digits; this
+/// parser is deliberately ASCII-only (see the mirror note in index.py).
 fn parse_int(tok: &[u8]) -> Result<Option<u64>, String> {
     let body = &tok[1..];
     if body.len() > 100 {
@@ -394,8 +396,8 @@ impl Builder {
     }
 
     /// Close the current block at `position` (Python flush()).
-    fn flush(&mut self, end: u64) {
-        if end <= self.block_start { return; }
+    fn flush(&mut self, end: u64) -> Result<(), String> {
+        if end <= self.block_start { return Ok(()); }
         let bid = self.blocks.len() as u32;
         let bytes = end - self.block_start;
         if bytes > self.max_block_bytes { self.max_block_bytes = bytes; }
@@ -406,7 +408,11 @@ impl Builder {
             let ord = self.touched[i];
             let pos = self.recent_pos[ord as usize];
             if pos != u64::MAX {
-                self.postings[ord as usize].push((bid, (pos - start) as u32));
+                let rel = pos - start;
+                if rel > u32::MAX as u64 {
+                    die!("record offset {} within a block exceeds u32", rel);
+                }
+                self.postings[ord as usize].push((bid, rel as u32));
                 self.recent_pos[ord as usize] = u64::MAX;
                 self.touched.swap_remove(i);
             } else {
@@ -415,12 +421,14 @@ impl Builder {
         }
         self.block_start = end;
         self.block_initial = self.current;
+        Ok(())
     }
 
-    fn item_boundary(&mut self, position: u64) {
+    fn item_boundary(&mut self, position: u64) -> Result<(), String> {
         if position - self.block_start >= self.block_bytes {
-            self.flush(position);
+            self.flush(position)?;
         }
+        Ok(())
     }
 
     /// Operand fetch for b/r/p identifiers. None when structural (pushed
@@ -466,18 +474,18 @@ impl Builder {
             if debug {
                 eprintln!("item {:?} @{} cur={}", String::from_utf8_lossy(self.tok.bytes(t)), t.off, self.current);
             }
-            self.item_boundary(t.off);
+            self.item_boundary(t.off)?;
             let class = classify(self.tok.bytes(t))?;
             self.apply_fresh(t, class)?;
         }
-        self.flush(end_of_data);
+        self.flush(end_of_data)?;
         Ok(())
     }
 
     /// Pushed-back items are only '#<digits>' tokens (structural operands)
     /// or single strength digits — timestamps or no-ops in item position.
     fn apply_pending(&mut self, v: &[u8], off: u64) -> Result<(), String> {
-        self.item_boundary(off);
+        self.item_boundary(off)?;
         if let Class::Time(tv) = classify(v)? {
             if tv < self.current {
                 die!("non-monotonic timestamps: index requires fallback");

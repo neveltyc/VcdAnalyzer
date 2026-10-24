@@ -3,11 +3,37 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
-## Unreleased
+## [1.6.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.0) - 2026-10-25
+
+### Added
+
+- Index sidecar for huge dumps (full variant): `vcd_analyzer index <file>` builds an optional
+  `<file>.vcidx` (~0.1-0.25% of the source); every query command then uses it automatically with
+  byte-identical output — on a 10.31 GiB VeeRwolf dump, a fresh-process snapshot drops from 91 s
+  to 0.27 s.
+- Native multi-core builder embedded in the single file: prebuilt cdylibs for arm64/x86-64 Linux
+  (glibc >= 2.17), arm64 macOS and x86-64 Windows, lzma+base85-embedded, checksum-verified,
+  loaded through a C ABI (ctypes); Linux loads from memory (memfd) without touching the disk.
+  4 threads build the 10.31 GiB index in 4.8 s (~2.3 GB/s); platforms without an embedded
+  library fall back to the pure-Python builder automatically.
+- Background auto-build: a query that finds no sidecar (or a stale one) spawns ONE detached
+  builder per file (O_EXCL lock, dead-owner reclaim, `VCD_ANALYZER_AUTO_INDEX=0` disables);
+  a source that looks still-open-for-write (fresh mtime, lsof holder, Windows sharing
+  violation) is reported and left alone.
+- `index --output PATH` stores the sidecar anywhere and symlinks `<file>.vcidx` to it
+  (never deletes a pre-existing regular file; link/build failures are reported, never fatal).
+- `vcd_analyzer_lite.py`: the pure-Python 1.5.6-behavior build — same queries, no index
+  machinery; anything index-related answers with a clear pointer to the full file.
+- Environment: `VCD_ANALYZER_AUTO_INDEX`, `VCD_ANALYZER_NO_INDEX`,
+  `VCD_ANALYZER_INDEX_THREADS`.
 
 ### Changed
 
-- Development model: the release single file is now generated from the modules under `src/` by `_make.py` (byte-exact concatenation; `--check` compares). CI rejects a `vcd_analyzer.py` that differs from `src/`. No functional change — the assembled file differs from 1.5.6 only by Part banner comments (249 tests unchanged and green).
+- Development model: both release files are generated from `src/` by `_make.py` (byte-exact
+  concatenation; `--check` verifies lite byte-exactly and full by exact head/tail plus a
+  structural check of the embedded native part). CI rejects drifted release files.
+- Sidecar freshness is `(size, mtime_ns)` recorded at build time — O(1) per query, no
+  content hashing; the builder aborts if the source changes mid-build.
 
 ## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
 

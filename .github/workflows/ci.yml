@@ -1,10 +1,12 @@
-# Two guarantees per push/PR:
-#   1. the released single file vcd_analyzer.py is byte-identical to src/
-#      (edit src/, never the release file; `python _make.py` regenerates it)
-#   2. the full test suite passes on the oldest (3.9) and newest supported
-#      Python of each release-critical platform
-# Windows is exercised when the planned fast variant (embedded native
-# index-builder libraries) lands; the pure-Python file is platform-neutral.
+# Guarantees per push/PR:
+#   1. both release files match src/ (lite byte-exactly; full by exact
+#      src/-derived head/tail plus a structural check of the embedded
+#      native part — the blobs need the Rust toolchain, so they are
+#      checked structurally)
+#   2. the full suite passes on the oldest (3.9) and newest supported
+#      Python of each release-critical platform, Windows included: the
+#      full variant's embedded native builder is exercised for real on
+#      every matrix leg that has a matching library
 name: ci
 on:
   push:
@@ -21,12 +23,13 @@ jobs:
           - { os: ubuntu-latest,  python: '3.9'  }
           - { os: ubuntu-latest,  python: '3.13' }
           - { os: macos-latest,   python: '3.13' }
+          - { os: windows-latest, python: '3.13' }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Release file matches src/
+      - name: Release files match src/
         run: python _make.py --check
       - name: Install pytest
         run: pip install pytest

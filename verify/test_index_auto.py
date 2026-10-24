@@ -1,6 +1,6 @@
 """Tests for index-building ergonomics: --output + symlink fallback, the
 background auto-build (single-flight lock, kill switch, stale rebuild,
-writer-hold detection)."""
+writer-hold detection). POSIX-only: symlink, chmod and lock semantics."""
 import os
 import sys
 import time
@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vcd_analyzer as va
 
 from test_index import _big_vcd  # gate-passing synthetic file helper
+
+pytestmark = pytest.mark.skipif(sys.platform == 'win32',
+                                reason='POSIX symlink/chmod/lock semantics')
 
 
 def _clear_autobuild_state():

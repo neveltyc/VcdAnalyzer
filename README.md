@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.5.6-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.6.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-249%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-272%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -24,6 +24,11 @@ hierarchy, zooming in, squinting at values. This tool gives you the answer in on
 It is also designed from the ground up for **agent-assisted workflows**: every command has a
 `--json` mode that emits compact, machine-readable output so LLM agents can inspect waveforms
 without a GUI.
+
+For giant dumps (GB-scale) the full variant adds an **index sidecar**: a one-time
+`index` build (~0.2% of the file) turns point queries that would scan the whole
+file for minutes into sub-second lookups — built for you in the background while
+you keep working.
 
 ```bash
 python vcd_analyzer.py search sim.vcd --condition "state=5" --show data,valid --begin 17us
@@ -56,21 +61,36 @@ python vcd_analyzer.py snapshot sim.vcd --at 17.55us --filter state,init_done
 
 # Any signal change count, static vs active?
 python vcd_analyzer.py summary sim.vcd --filter dll_*
+
+# Index a 10 GB dump once; every later query is instant (full variant)
+python vcd_analyzer.py index sim.vcd
 ```
 
-## Install
+## Install: full or lite
 
-Single file, no dependencies, Python 3.9+.
+Two single files, no dependencies, Python 3.9+.
+
+**`vcd_analyzer.py` — full (the default).** Everything above, plus the index
+sidecar. It embeds prebuilt native builder libraries for arm64/x86-64 Linux,
+arm64 macOS and x86-64 Windows (64-bit; Linux needs glibc ≥ 2.17), extracted
+and checksum-verified automatically — one ~1.6 MB file, still zero installs.
 
 ```bash
-# Latest
+# Latest (full)
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.6/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
 
-# Verify
 python vcd_analyzer.py --version
+```
+
+**`vcd_analyzer_lite.py` — lite.** The pure-Python program (~180 KB) with the
+1.5.6 behavior: no index feature (the `index` command answers with a clear
+pointer to the full file), identical query output otherwise.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
 ```
 
 No pip, no venv, no PyPI. Works anywhere curl and Python 3.9+ are available — CI containers, EDA servers, Docker builds, agent toolchains.
@@ -86,6 +106,7 @@ No pip, no venv, no PyPI. Works anywhere curl and Python 3.9+ are available — 
 | `snapshot` | What are all known signal values at time T? |
 | `compare` | What changed between T1 and T2? |
 | `search` | Find intervals where conditions hold, optionally watching related signals |
+| `index` | Build the optional `.vcidx` sidecar that makes point queries instant on huge dumps (full variant) |
 
 All commands accept `--begin` / `--end` time windows with unit suffixes (`fs`, `ps`, `ns`, `us`, `ms`, `s`),
 `--filter` with substring or glob patterns, and `--json` for structured output.
@@ -101,6 +122,26 @@ get raw tick counts (`_ticks`) alongside human-readable times (`_h`).
 python vcd_analyzer.py --json info sim.vcd
 python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
+
+## The index sidecar (full variant)
+
+- **Explicit or automatic.** `vcd_analyzer.py index sim.vcd` builds `sim.vcd.vcidx`
+  (~0.1-0.25% of the source; 10 GB in ~5 s with the native builder's 4 threads,
+  or ~6 min with the pure-Python fallback on platforms without an embedded
+  library). Or do nothing: the first query on a big unindexed dump spawns a
+  background build (one per file, lock-guarded) and the next query is fast.
+- **Queries use it automatically** whenever the sidecar is fresh; output is
+  byte-identical to the plain parser, only faster.
+- **Freshness is `(size, mtime_ns)`** recorded in the sidecar header — O(1) per
+  query, no content hashing. A stale sidecar warns once and the plain parser
+  answers; an automatic rebuild is skipped (with a message) while the source
+  looks still-open-for-write (mtime < 5 s, an `lsof` holder, or a Windows
+  sharing violation).
+- Environment: `VCD_ANALYZER_AUTO_INDEX=0` disables background builds,
+  `VCD_ANALYZER_NO_INDEX=1` disables index use entirely,
+  `VCD_ANALYZER_INDEX_THREADS=N` caps the native build threads (default
+  min(4, cores)).
+- The lite variant has none of this and says so explicitly.
 
 ## Semantics notes
 
@@ -158,13 +199,15 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 ## Project layout
 
 ```
-src/                  Source modules — edit here (Parts 1-8, see _make.py)
-_make.py              Assembler: concatenates src/ into vcd_analyzer.py (--check verifies)
-vcd_analyzer.py       Release artifact (single file, stdlib only; generated, do not edit)
-verify/               pytest + unittest suite — 249 tests, 0 failures
+src/                  Source modules — edit here (Parts 1-9, see _make.py)
+_make.py              Assembler: builds both release files from src/ (--check verifies)
+vcd_analyzer.py       Release artifact: FULL variant (generated; do not edit)
+vcd_analyzer_lite.py  Release artifact: LITE variant, pure Python (generated)
+native/               Rust index-builder crate + cross-build script (cargo-zigbuild)
+verify/               pytest + unittest suite — 272 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
-.github/workflows/    CI: release file must match src/, tests on 3.9 and 3.13
+.github/workflows/    CI: both release files must match src/, tests on 3.9-3.13
 CHANGELOG.md          Compact changelog with links to detailed release notes
 ```
 
@@ -182,12 +225,10 @@ CI rejects any commit where `vcd_analyzer.py` differs from a fresh assembly
 of `src/`. Only `_preamble.py` may contain module-level imports — the parts
 share one namespace by concatenation, and `_make.py --check` enforces this.
 
-Two release variants are planned: the **standard** file above (pure Python,
-today's behavior, unchanged) and a future **fast** variant that appends
-compressed native index-builder libraries (arm64-linux, x86-64-linux,
-arm64-macos, x86-64-windows; C ABI + ctypes, extracted and loaded at runtime,
-falling back to the pure-Python path whenever anything is missing). Both are
-assembled from the same `src/` so they evolve together.
+The two variants are assembled from the same `src/` (only the Part-4 slot
+differs: the lite build carries an explicit stub that errors clearly on
+anything index-related) and can never diverge silently — `_make.py --check`
+rejects a drifted release file, and CI enforces it.
 
 ## Tests
 
@@ -218,6 +259,7 @@ Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc
 
 | Version | Highlight |
 |:--------|:----------|
+| `1.6.0` | Index sidecar for huge dumps (full variant): native multi-core builder embedded as one file, automatic background builds, instant point queries; `src/` maintenance model with generated release files; lite variant for pure-Python 1.5.6 behavior |
 | `1.5.6` | Bit-exploded buses change once per tick and contiguous runs from any bit are reassembled; exact time output and parsing; full-width vector comparison; `summary` counts match `changed()`; BOM/`$timescale` warnings |
 | `1.5.5` | Correct filtered-list counts and search OR events; reject empty waveforms and malformed time/filter arguments; bound token sizes, avoid glob backtracking, and spool unlimited output |
 | `1.5.4` | `search` targets accept don't-care bits: `?` in a binary literal matches any bit value, as in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus), so single bits and fields of a bus can be searched without dumping the whole bus |

@@ -1,5 +1,5 @@
 # ================================================================
-# Part 4: Index sidecar — fast variant only (this is the standard build)
+# Part 4: Index sidecar — full variant only (this is the lite build)
 # ================================================================
 #
 # vcd_analyzer_lite.py is the pure-Python build with 1.5.6 behavior:

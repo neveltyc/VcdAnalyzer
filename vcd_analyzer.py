@@ -91,7 +91,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.5.6'
+__version__ = '1.6.0'
 
 import sys
 import os
@@ -2676,7 +2676,7 @@ def sidecar_path(vcd_path):
 
 
 def native_index_build(path, sidecar, block_bytes):
-    """Build via the embedded native library (fast variant only).
+    """Build via the embedded native library (full variant only).
 
     Fully automatic: the pure-Python builder is the fallback for every
     case the native path cannot serve — standard file without an embedded
@@ -4027,9 +4027,8 @@ def cmd_index(vcd, args):
         r['raw_symbols'], r['signal_block_pairs']))
     print('Time     : {:.3f}s'.format(r['build_s']))
     if builder == 'python' and r['source_bytes'] >= 64 << 20:
-        # Same feature on both variants, never a gate: the fast variant
-        # only adds the native builder. Big file + slow builder is exactly
-        # when the user should know the other variant exists.
+        # Full variant, no library for this platform: say so when the file
+        # is big enough for the difference to matter.
         print('Note     : no native library for this platform — pure-Python '
               'builder (~30 MB/s). Supported platforms build natively with up '
               'to 4 threads (~2 GB/s).')

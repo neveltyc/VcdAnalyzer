@@ -91,7 +91,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.5.6'
+__version__ = '1.6.0'
 
 import sys
 import os

@@ -91,7 +91,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.5.6'
+__version__ = '1.6.0'
 
 import sys
 import os
@@ -1960,7 +1960,7 @@ class VCDParser:
 
 
 # ================================================================
-# Part 4: Index sidecar — fast variant only (this is the standard build)
+# Part 4: Index sidecar — full variant only (this is the lite build)
 # ================================================================
 #
 # vcd_analyzer_lite.py is the pure-Python build with 1.5.6 behavior:
@@ -3128,9 +3128,8 @@ def cmd_index(vcd, args):
         r['raw_symbols'], r['signal_block_pairs']))
     print('Time     : {:.3f}s'.format(r['build_s']))
     if builder == 'python' and r['source_bytes'] >= 64 << 20:
-        # Same feature on both variants, never a gate: the fast variant
-        # only adds the native builder. Big file + slow builder is exactly
-        # when the user should know the other variant exists.
+        # Full variant, no library for this platform: say so when the file
+        # is big enough for the difference to matter.
         print('Note     : no native library for this platform — pure-Python '
               'builder (~30 MB/s). Supported platforms build natively with up '
               'to 4 threads (~2 GB/s).')

@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.5.6-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.6.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-249%20passed-22aa55?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/测试-272%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -22,6 +22,9 @@
 
 它从设计之初就面向 **AI Agent 辅助调试**：每个命令都有 `--json` 模式，输出紧凑的机器可读结构，
 LLM Agent 可以直接读取波形信息，无需图形界面。
+
+面对 GB 级巨型 dump，完整版还提供**索引 sidecar**：一次 `index` 构建（约为源文件的
+0.2%）把原本要全文件扫描数分钟的点查询变成亚秒级——而且可以在后台自动完成。
 
 ```bash
 python vcd_analyzer.py search sim.vcd --condition "state=5" --show data,valid --begin 17us
@@ -54,21 +57,36 @@ python vcd_analyzer.py snapshot sim.vcd --at 17.55us --filter state,init_done
 
 # 统计信号翻转次数，哪些是静态的？
 python vcd_analyzer.py summary sim.vcd --filter dll_*
+
+# 10GB dump 建一次索引，之后所有查询秒回（完整版）
+python vcd_analyzer.py index sim.vcd
 ```
 
-## 安装
+## 安装：完整版或精简版
 
-单文件，零依赖，Python 3.9+。
+两个单文件，零依赖，Python 3.9+。
+
+**`vcd_analyzer.py` —— 完整版（默认）。** 以上全部功能外加索引 sidecar。
+内嵌了 arm64/x86-64 Linux、arm64 macOS、x86-64 Windows 的预构建原生库
+（纯 64 位；Linux 需 glibc ≥ 2.17），运行时自动解压并校验——单个约 1.6MB
+的文件，依然零安装。
 
 ```bash
-# 最新版
+# 最新版（完整版）
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.5.6/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
 
-# 验证
 python vcd_analyzer.py --version
+```
+
+**`vcd_analyzer_lite.py` —— 精简版。** 约 180KB 的纯 Python 程序，
+保持 1.5.6 行为：没有索引功能（`index` 命令会明确提示改用完整版），
+其余查询输出与完整版完全一致。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
 ```
 
 无需 pip、无需虚拟环境、无需 PyPI。只要有 curl 和 Python 3.9+ 就能用——适合 CI 容器、EDA 服务器、Docker 构建、Agent 工具链。
@@ -84,6 +102,7 @@ python vcd_analyzer.py --version
 | `snapshot` | 指定时刻所有已知信号的瞬时值 |
 | `compare` | 两个时刻之间哪些信号变了？ |
 | `search` | 条件搜索：找出条件成立的区间，可选观察关联信号 |
+| `index` | 构建可选的 `.vcidx` 索引，让巨型文件的点查询瞬间完成（完整版） |
 
 所有命令支持 `--begin` / `--end` 时间窗口（带单位：`fs`/`ps`/`ns`/`us`/`ms`/`s`），
 `--filter` 子串或通配符过滤，以及 `--json` 结构化输出。
@@ -99,6 +118,22 @@ python vcd_analyzer.py --version
 python vcd_analyzer.py --json info sim.vcd
 python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
+
+## 索引 sidecar（完整版）
+
+- **显式或自动。** `vcd_analyzer.py index sim.vcd` 生成 `sim.vcd.vcidx`
+  （约为源文件的 0.1-0.25%；原生构建器 4 线程 10GB 约 5 秒，无内嵌库的
+  平台回退纯 Python 约需数分钟）。也可以什么都不做：对未索引的大文件的
+  第一次查询会自动在后台构建（每文件单飞、带锁），下一次查询就快了。
+- **查询自动使用**新鲜的索引；输出与纯解析器逐字节一致，只是更快。
+- **新鲜度以 `(文件大小, 纳秒级 mtime)` 判定**，记录在索引头部——每条查询
+  O(1)，不做内容哈希。索引陈旧时警告一次并由纯解析器回答；源文件疑似仍在
+  被写入时（mtime < 5 秒、lsof 显示被持有、Windows 共享冲突）自动重建被
+  跳过并给出提示。
+- 环境变量：`VCD_ANALYZER_AUTO_INDEX=0` 关闭后台构建，
+  `VCD_ANALYZER_NO_INDEX=1` 完全禁用索引，
+  `VCD_ANALYZER_INDEX_THREADS=N` 限制原生构建线程数（默认 min(4, 核数)）。
+- 精简版没有这些功能，遇到会明确报错说明。
 
 ## 语义说明
 
@@ -137,16 +172,22 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ## 单文件，零依赖
 
-`vcd_analyzer.py` 是零第三方依赖的纯 Python。不需要 `pip install`，不需要虚拟环境
-——随便放到 Python 3.9+ 环境里就能跑。
+两个版本都是单文件、零第三方 Python 依赖。完整版额外内嵌压缩的原生构建库，
+运行时经 C ABI 加载，平台不匹配时自动回退纯 Python。不需要 `pip install`，
+不需要虚拟环境——随便放到 Python 3.9+ 环境里就能跑。
 
 ## 项目结构
 
 ```
-vcd_analyzer.py       核心工具（单文件，仅依赖标准库）
-verify/               pytest + unittest 测试套件 —— 231 个用例，0 失败
+src/                  源码模块（在此编辑，Parts 1-9，见 _make.py）
+_make.py              打包器：从 src/ 生成两个发行文件（--check 校验）
+vcd_analyzer.py       发行物：完整版（生成文件，勿手改）
+vcd_analyzer_lite.py  发行物：精简版，纯 Python（生成文件）
+native/               Rust 索引构建器 crate + 交叉编译脚本
+verify/               pytest + unittest 测试套件 —— 272 个用例，0 失败
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
+.github/workflows/    CI：两个发行文件必须与 src/ 一致，3.9-3.13 测试
 CHANGELOG.md          简洁变更日志，含详细发行说明链接
 ```
 
@@ -178,6 +219,7 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 | 版本 | 亮点 |
 |:------|:-----|
+| `1.6.0` | 巨型 dump 的索引 sidecar（完整版）：单文件内嵌多核原生构建器、后台自动构建、点查询秒回；`src/` 维护模型生成发行文件；精简版保留纯 Python 1.5.6 行为 |
 | `1.5.6` | 位拆分总线每个时刻只变化一次，任意起始位的连续位段可重组；时间输出与解析精确；向量按完整位宽比较；`summary` 计数与 `changed()` 一致；BOM 与 `$timescale` 警告 |
 | `1.5.5` | 修正过滤列表计数和搜索 OR 事件；拒绝空波形及非法时间/过滤参数；限制 token 长度、避免 glob 回溯，无限量结果改用临时文件 |
 | `1.5.4` | `search` 目标值支持不关心位:二进制字面量中的 `?` 匹配任意位值,同 Verilog `casez`(`status=b?????1??` 检查 8 位总线的第 2 位),无需 dump 整条总线即可按单个位或位段搜索 |

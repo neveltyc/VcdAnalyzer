@@ -715,7 +715,7 @@ def sidecar_path(vcd_path):
 
 
 def native_index_build(path, sidecar, block_bytes):
-    """Build via the embedded native library (fast variant only).
+    """Build via the embedded native library (full variant only).
 
     Fully automatic: the pure-Python builder is the fallback for every
     case the native path cannot serve — standard file without an embedded

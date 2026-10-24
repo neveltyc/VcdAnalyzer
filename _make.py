@@ -111,16 +111,15 @@ def _concat(order):
     return ''.join(parts[name] for name in order)
 
 
-# -- fast variant ------------------------------------------------------------
+# -- full variant (embedded native part) -------------------------------------
 #
-# vcd_analyzer_fast.py = the standard assembly + a GENERATED part inserted
-# before cli.py that embeds the native index-builder libraries (lzma +
-# base85) for arm64-linux / x86-64-linux / arm64-macos / x86-64-windows and
-# loads them through ctypes (C ABI), falling back to the pure-Python builder
-# whenever anything is missing. The generated part lives in build/, never
-# src/ (it is data, and it needs imports the discipline check forbids).
-# CI checks the standard file only: the fast file needs the Rust toolchain
-# to reproduce (native/build_all.sh), so it is generated at release time.
+# vcd_analyzer.py (full) = the lite assembly's shared parts with the REAL
+# index engine, plus a GENERATED part appended before cli.py that embeds
+# the native index-builder libraries (lzma + base85) for arm64-linux /
+# x86-64-linux / arm64-macos / x86-64-windows and loads them through
+# ctypes (C ABI), falling back to the pure-Python builder whenever
+# anything is missing. The generated part lives in build/, never src/
+# (it is data, and it needs imports the discipline check forbids).
 
 FULL_OUTPUT = HERE / 'vcd_analyzer.py'
 LITE_OUTPUT = HERE / 'vcd_analyzer_lite.py'

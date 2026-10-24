@@ -43,6 +43,10 @@
 //     the crossing item opens the new block; block t1 is the time before
 //     it, the next block's t0 the same value
 //   * source (size, mtime_ns) must not change during the build
+//   * any grammar-position token ('#', b, r, p openers) carrying a
+//     non-ASCII byte is REFUSED (Err): Python's int()/regexes accept
+//     Unicode digits, so instead of silently disagreeing with the
+//     reference parser the caller defers to the pure-Python builder
 
 use std::collections::VecDeque;
 use std::fs::File;

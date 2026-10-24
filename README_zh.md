@@ -189,6 +189,20 @@ verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
 CHANGELOG.md          简洁变更日志，含详细发行说明链接
 ```
 
+## 开发
+
+两个发行文件都是生成物。在 `src/` 下编辑模块（`_preamble.py` 存放
+docstring、版本与全部 import；其余按 `_make.py` 中的 Part 编号），
+提交前重新生成：
+
+```bash
+python _make.py        # 重建 vcd_analyzer.py 与 vcd_analyzer_lite.py
+```
+
+CI 会拒绝发行文件与 `src/` 不一致的提交，并在每次 push 时跑全量测试
+（Linux/macOS/Windows，Python 3.9-3.13）；本地先跑测试是可选的。
+只有 `_preamble.py` 可以包含模块级 import——各部分共享同一个命名空间。
+
 ## 测试
 
 ```bash

@@ -212,16 +212,18 @@ CHANGELOG.md          Compact changelog with links to detailed release notes
 
 ## Development
 
-The single file is a generated artifact. Edit the modules under `src/`
+Both release files are generated artifacts. Edit the modules under `src/`
 (`_preamble.py` holds the docstring, version and imports; the rest follow the
-Part numbering in `_make.py`), then rebuild and test before committing:
+Part numbering in `_make.py`), then regenerate before committing:
 
 ```bash
-python _make.py && python -m pytest verify/ -q && python _make.py --check
+python _make.py        # rebuild vcd_analyzer.py + vcd_analyzer_lite.py
 ```
 
-CI rejects any commit where `vcd_analyzer.py` differs from a fresh assembly
-of `src/`. Only `_preamble.py` may contain module-level imports — the parts
+CI rejects any commit where a release file differs from a fresh assembly of
+`src/`, and runs the full test suite on every push (Linux/macOS/Windows,
+Python 3.9-3.13) — running it locally first is optional. Only `_preamble.py`
+may contain module-level imports — the parts
 share one namespace by concatenation, and `_make.py --check` enforces this.
 
 The two variants are assembled from the same `src/` (only the Part-4 slot

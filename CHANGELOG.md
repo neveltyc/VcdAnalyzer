@@ -50,6 +50,9 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 - The embedded-library cache re-verifies checksums before loading; `--block-mib` is
   validated (1..4096); sources with pre-1970 mtimes are refused instead of producing a
   permanently-stale sidecar.
+- The native builder refuses grammar tokens carrying non-ASCII bytes (Python's `int()`
+  accepts Unicode digits) and defers to the pure-Python builder, so indexed behavior
+  never diverges from the plain parser even on adversarial encodings.
 
 ## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
 

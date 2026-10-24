@@ -29,18 +29,20 @@ The module order matches the Part numbering in the assembled file:
 
 Each file is concatenated as-is, so the assembled output is a byte-level
 exact reproduction of the modules — `--check` (run in CI) fails the build
-whenever vcd_analyzer.py drifts from src/.
+whenever a release file drifts from src/.
 
-Maintenance rule (enforced by CI): edit src/, never the release file, then
+Maintenance rule (enforced by CI): edit src/, never the release files,
+then regenerate before committing:
 
-    python _make.py && python -m pytest verify/ -q && python _make.py --check
+    python _make.py          # rebuild both artifacts (--check verifies)
+
+The test suite runs in CI on every push (Linux/macOS/Windows, Python
+3.9-3.13); running it locally first is optional and recommended for
+large changes.
 
 Discipline: only _preamble.py may contain module-level imports — the parts
 share one namespace by concatenation, and a stray import would still work
-but hides dependencies; --check rejects it. A planned `--fast` variant
-(standard file + embedded compressed native index-builder libraries for
-arm64-linux / x86-64-linux / arm64-macos / x86-64-windows via ctypes)
-will append a loader part; it is not assembled yet.
+but hides dependencies; --check rejects it.
 """
 
 import base64

@@ -8,53 +8,38 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 ### Added
 
 - Index sidecar for huge dumps (full variant): `vcd_analyzer index <file>` builds an optional
-  `<file>.vcidx` (~0.1-0.25% of the source); every query command then uses it automatically with
-  byte-identical output — on a 10.31 GiB VeeRwolf dump, a fresh-process snapshot drops from 91 s
-  to 0.27 s.
-- Native multi-core builder embedded in the single file: prebuilt cdylibs for arm64/x86-64 Linux
-  (glibc >= 2.17), arm64 macOS and x86-64 Windows, lzma+base85-embedded, checksum-verified,
-  loaded through a C ABI (ctypes); Linux loads from memory (memfd) without touching the disk.
-  4 threads build the 10.31 GiB index in 4.8 s (~2.3 GB/s); platforms without an embedded
-  library fall back to the pure-Python builder automatically.
-- Background auto-build: a query that finds no sidecar (or a stale one) spawns ONE detached
-  builder per file (O_EXCL lock, dead-owner reclaim, `VCD_ANALYZER_AUTO_INDEX=0` disables);
-  a source that looks still-open-for-write (fresh mtime, lsof holder, Windows sharing
-  violation) is reported and left alone. On platforms without an embedded native builder,
-  automatic builds are off by default — they would only run the much slower pure-Python
-  pass; the `index` command still works there and reports which mechanism it used.
-- `index --output PATH` stores the sidecar anywhere and symlinks `<file>.vcidx` to it
-  (never deletes a pre-existing regular file; link/build failures are reported, never fatal).
-- `vcd_analyzer_lite.py`: the pure-Python 1.5.6-behavior build — same queries, no index
-  machinery; anything index-related answers with a clear pointer to the full file.
+  `<file>.vcidx`; every query command then uses it automatically with identical output — on a
+  10.31 GiB dump, a fresh-process snapshot drops from 91 s to 0.27 s. A query that finds no
+  sidecar starts a background build by itself (one per file); a source that looks
+  still-open-for-write is reported and left alone.
+- Native multi-core index builder embedded in the single file: prebuilt libraries for
+  arm64/x86-64 Linux (glibc >= 2.17), arm64 macOS and x86-64 Windows, loaded through a C ABI
+  and checksum-verified; the 10.31 GiB index builds in ~5 s with 4 threads. Platforms without
+  an embedded library fall back to the pure-Python builder automatically.
+- `index --output PATH` stores the sidecar elsewhere (PATH must end with `.vcidx`) and links
+  `<file>.vcidx` to it.
+- `vcd_analyzer_lite.py`: the pure-Python build with the 1.5.6 behavior — same queries, no
+  index feature; index attempts answer with a clear pointer to the full file.
 - Environment: `VCD_ANALYZER_AUTO_INDEX`, `VCD_ANALYZER_NO_INDEX`,
   `VCD_ANALYZER_INDEX_THREADS`.
 
 ### Changed
 
-- Development model: both release files are generated from `src/` by `_make.py` (byte-exact
-  concatenation; `--check` verifies lite byte-exactly and full by exact head/tail plus a
-  structural check of the embedded native part). CI rejects drifted release files.
-- Sidecar freshness is `(size, mtime_ns)` recorded at build time — O(1) per query, no
-  content hashing; the builder aborts if the source changes mid-build.
+- Both release files are generated from the `src/` module directory by `_make.py`; CI rejects
+  a release file that drifts from it.
+- Sidecar freshness is `(size, mtime_ns)` recorded at build time — O(1) per query, no content
+  hashing.
 
 ### Fixed
 
-- Sidecars are published atomically (temporary file + rename) by both builders; a truncated
-  or corrupt sidecar is reported once and every command falls back to the plain parser
-  instead of crashing.
-- Tolerated malformed timestamps (`#1.5`-style tokens) no longer corrupt multi-threaded
-  index builds (split points must now be fully-parsed timestamps that are not declared
-  identifiers) and no longer act as bit-exploded-bus commit points in the indexed stream.
-- A stale sidecar no longer leaks the source file descriptor — the leak made `lsof` report
-  the tool itself as the writer and permanently blocked automatic rebuilds.
-- The embedded-library cache re-verifies checksums before loading; `--block-mib` is
-  validated (1..4096); sources with pre-1970 mtimes are refused instead of producing a
-  permanently-stale sidecar.
-- The native builder refuses grammar tokens carrying non-ASCII bytes (Python's `int()`
-  accepts Unicode digits) and defers to the pure-Python builder, so indexed behavior
-  never diverges from the plain parser even on adversarial encodings.
+- Index builds and sidecar handling are hardened across the board: atomic publication,
+  clean fallback to the plain parser on truncated or corrupt sidecars, no file-descriptor
+  leaks, single-flight background builds via an OS file lock, and indexed results proven
+  identical to the plain parser on the parser's full torture corpus — including malformed
+  timestamps, adversarial encodings and hostile inputs that previously could corrupt a
+  multi-threaded build.
 
-## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
+## [1.5.6]## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
 
 ### Fixed
 

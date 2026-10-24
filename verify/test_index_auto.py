@@ -31,7 +31,7 @@ def _settled(path):
 def test_output_with_symlink(tmp_path):
     src = _big_vcd(tmp_path)
     _settled(src)
-    out = tmp_path / 'cust' / 'sidecar.idx'
+    out = tmp_path / 'cust' / 'sidecar.vcidx'
     out.parent.mkdir()
     result = _run_cli(['index', str(src), '--output', str(out)])
     assert result.returncode == 0, result.stderr
@@ -50,7 +50,7 @@ def test_output_link_failure_warns(tmp_path):
     vcd_dir.mkdir()
     src = _big_vcd(vcd_dir)
     _settled(src)
-    out = tmp_path / 'elsewhere.idx'
+    out = tmp_path / 'elsewhere.vcidx'
     os.chmod(vcd_dir, 0o500)  # sidecar link cannot land next to the vcd
     try:
         _clear_autobuild_state()

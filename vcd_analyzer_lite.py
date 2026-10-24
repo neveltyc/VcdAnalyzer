@@ -3080,6 +3080,12 @@ def cmd_index(vcd, args):
     sidecar = sidecar_path(args.file)
     target = os.path.abspath(args.output) if args.output else sidecar
     if args.output:
+        # Sidecars are always named *.vcidx — an arbitrary extension would
+        # leave unrecognizable binary files on disk and invite confusion
+        # with the waveform itself.
+        if not target.endswith('.vcidx'):
+            sys.exit('Error: --output must end with .vcidx '
+                     '(e.g. --output {}{})'.format(target, '.vcidx'))
         # --output pointing at the input VCD would REPLACE the waveform
         # with the sidecar at publication; --force must not bypass this.
         same = (os.path.realpath(target) == os.path.realpath(args.file)
@@ -3860,7 +3866,7 @@ def main():
     sp.add_argument('--force', action='store_true',
                     help='rebuild even if the sidecar already exists')
     sp.add_argument('--output', metavar='PATH', default=None,
-                    help='write the sidecar at PATH and link <file>.vcidx to it')
+                    help='write the sidecar at PATH (must end with .vcidx) and link <file>.vcidx to it')
     sp.add_argument('--threads', type=int, default=None, metavar='N',
                     help='native builder threads, 1..16 (default min(4, cores))')
     sp.add_argument('--auto', action='store_true', help=argparse.SUPPRESS)

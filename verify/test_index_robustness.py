@@ -43,7 +43,7 @@ def test_multithread_survives_malformed_timestamps(tmp_path):
     src = _malformed_ts_vcd(tmp_path / 'bad.vcd')
     env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
                VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
-    sidecar = tmp_path / 'side.idx'
+    sidecar = tmp_path / 'side.vcidx'
     result = subprocess.run(
         [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
          str(src), '--output', str(sidecar), '--block-mib', '1'],
@@ -133,10 +133,14 @@ def test_block_mib_bounds(tmp_path, mib):
 
 def test_output_may_not_be_the_vcd_itself(tmp_path):
     """--output pointing at the input VCD must be refused BEFORE any build:
-    publication would replace the waveform with the sidecar (P0)."""
+    publication would replace the waveform with the sidecar (P0). The VCD
+    is named *.vcidx so the suffix guard passes and the identity guard is
+    the one that fires."""
     import hashlib
+    import shutil
     from conftest import run_cli
-    src = _big_vcd(tmp_path)
+    src = tmp_path / 'waveform.vcidx'  # a VCD that ends with the suffix
+    shutil.copy(_big_vcd(tmp_path), src)
     digest = hashlib.sha256(src.read_bytes()).hexdigest()
     result = run_cli(['index', str(src), '--output', str(src), '--force'])
     assert result.returncode != 0
@@ -175,11 +179,11 @@ def test_comment_body_never_becomes_split_anchor(tmp_path):
     import subprocess
     result = subprocess.run(
         [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
-         str(path), '--output', str(tmp_path / 's.idx'), '--block-mib', '1'],
+         str(path), '--output', str(tmp_path / 's.vcidx'), '--block-mib', '1'],
         capture_output=True, text=True, env=env, timeout=120)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['threads'] == 1  # census forced single
-    idx = va.IndexedVCD(path, tmp_path / 's.idx', enforce_gate=False)
+    idx = va.IndexedVCD(path, tmp_path / 's.vcidx', enforce_gate=False)
     raw = va.VCDParser(str(path))
     try:
         span = idx.blocks[-1][3]
@@ -208,3 +212,19 @@ def test_corrupt_directory_mode_detected_at_load(tmp_path):
     Path(va.sidecar_path(src)).write_bytes(bytes(data))
     va._warned.clear()
     assert va.try_index(src) is None
+
+
+def test_output_requires_vcidx_suffix(tmp_path):
+    """--output must produce a *.vcidx file: arbitrary extensions would
+    leave unrecognizable binaries and invite confusion with the waveform."""
+    from conftest import run_cli
+    src = _big_vcd(tmp_path)
+    bad = tmp_path / 'sidecar.bin'
+    result = run_cli(['index', str(src), '--output', str(bad)])
+    assert result.returncode != 0
+    assert 'must end with .vcidx' in result.stderr
+    assert not bad.exists()
+    good = tmp_path / 'sidecar.vcidx'
+    result = run_cli(['index', str(src), '--output', str(good)])
+    assert result.returncode == 0, result.stderr
+    assert good.exists()

@@ -15,6 +15,12 @@ def cmd_index(vcd, args):
     sidecar = sidecar_path(args.file)
     target = os.path.abspath(args.output) if args.output else sidecar
     if args.output:
+        # Sidecars are always named *.vcidx — an arbitrary extension would
+        # leave unrecognizable binary files on disk and invite confusion
+        # with the waveform itself.
+        if not target.endswith('.vcidx'):
+            sys.exit('Error: --output must end with .vcidx '
+                     '(e.g. --output {}{})'.format(target, '.vcidx'))
         # --output pointing at the input VCD would REPLACE the waveform
         # with the sidecar at publication; --force must not bypass this.
         same = (os.path.realpath(target) == os.path.realpath(args.file)

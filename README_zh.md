@@ -121,6 +121,8 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 - **显式或自动。** `vcd_analyzer.py index sim.vcd` 生成 `sim.vcd.vcidx`
   （约为源文件的百分之一都不到；10GB 级 dump 只需几秒）。也可以什么都不做：
   对未索引的大文件的第一次查询会自动在后台构建，下一次查询就快了。
+  `--output PATH` 可存到别处（PATH 必须以 `.vcidx` 结尾）并软链接回
+  `<file>.vcidx`；绝不删除已存在的普通文件，链接/构建失败只报告不致命。
 - **查询自动使用**新鲜的索引；输出完全一致，只是更快（分钟级点查询变亚秒级）。
 - **新鲜度以 `(文件大小, 纳秒级 mtime)` 判定**，记录在索引头部——每条查询
   O(1)，不做内容哈希。索引陈旧时警告一次并由纯解析器回答；源文件疑似仍在

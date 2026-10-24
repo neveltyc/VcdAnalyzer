@@ -121,12 +121,12 @@ _FAST_TEMPLATE = '''# ==========================================================
 # ================================================================
 #
 # Compressed (lzma) + base85 copies of the vcdidx cdylib for each shipped
-# platform. At first native build the matching library is extracted to a
-# cache directory (VCD_ANALYZER_NATIVE_DIR overrides it), checksum-
-# verified, and loaded via its C ABI. ANY failure — unsupported platform,
-# read-only cache, antivirus, load error — falls back to the pure-Python
-# builder in Part 4; correctness never depends on this part. Kill switch:
-# VCD_ANALYZER_NO_NATIVE=1.
+# platform. Linux loads straight from memory (memfd + dlopen on
+# /proc/self/fd, no disk); macOS and Windows dlopen by path only, so there
+# the library is checksum-verified, atomically extracted once to a fixed
+# cache dir and loaded. ANY failure — unsupported platform, read-only
+# cache, antivirus, load error — silently falls back to the pure-Python
+# builder in Part 4; correctness never depends on this part.
 
 import base64
 import ctypes
@@ -156,40 +156,56 @@ def _native_platform_key():
 
 
 _native_library_cache = {}
+_native_keep_open = []  # memfd handles that must outlive the CDLL load
 
 
 def _load_native_library():
-    if os.environ.get('VCD_ANALYZER_NO_NATIVE'):
-        return None
     key = _native_platform_key()
     if key is None or key not in _NATIVE_LIBS:
         return None
     if key in _native_library_cache:
         return _native_library_cache[key]
     info = _NATIVE_LIBS[key]
-    override = os.environ.get('VCD_ANALYZER_NATIVE_DIR')
-    if override:
-        cache_dir = os.path.join(override, 'vcd_analyzer-native')
-    elif sys.platform == 'win32':
-        base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
-        cache_dir = os.path.join(base, 'vcd_analyzer-native')
-    else:
-        cache_dir = os.path.join(os.path.expanduser('~'), '.cache',
-                                 'vcd_analyzer-native')
+    raw = None
+
+    def _verified_bytes():
+        data = lzma.decompress(base64.b85decode(''.join(info['data'].split())))
+        if (hashlib.sha256(data).hexdigest() != info['sha256']
+                or len(data) != info['size']):
+            return None
+        return data
+
     try:
-        target = os.path.join(cache_dir, 'vcdidx-{}-{}{}'.format(
-            _NATIVE_ABI_VERSION, info['sha256'][:16], info['ext']))
-        if not os.path.exists(target):
-            raw = lzma.decompress(base64.b85decode(''.join(info['data'].split())))
-            if (hashlib.sha256(raw).hexdigest() != info['sha256']
-                    or len(raw) != info['size']):
-                return None
-            os.makedirs(cache_dir, exist_ok=True)
-            tmp = target + '.tmp.{}'.format(os.getpid())
-            with open(tmp, 'wb') as out:
-                out.write(raw)
-            os.replace(tmp, target)
-        lib = ctypes.CDLL(target)
+        lib = None
+        if sys.platform.startswith('linux'):
+            # memfd + dlopen: the library never touches the filesystem.
+            try:
+                fd = os.memfd_create('vcdidx', 0)
+                os.write(fd, _verified_bytes() or b'')
+                os.lseek(fd, 0, os.SEEK_SET)
+                lib = ctypes.CDLL('/proc/self/fd/{}'.format(fd))
+                _native_keep_open.append(fd)  # mapping lives with the fd
+            except (AttributeError, OSError, ValueError):
+                lib = None  # fall through to the disk path
+        if lib is None:
+            if sys.platform == 'win32':
+                base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+                cache_dir = os.path.join(base, 'vcd_analyzer-native')
+            else:
+                cache_dir = os.path.join(os.path.expanduser('~'), '.cache',
+                                         'vcd_analyzer-native')
+            target = os.path.join(cache_dir, 'vcdidx-{}-{}{}'.format(
+                _NATIVE_ABI_VERSION, info['sha256'][:16], info['ext']))
+            if not os.path.exists(target):
+                raw = _verified_bytes()
+                if raw is None:
+                    return None
+                os.makedirs(cache_dir, exist_ok=True)
+                tmp = target + '.tmp.{}'.format(os.getpid())
+                with open(tmp, 'wb') as out:
+                    out.write(raw)
+                os.replace(tmp, target)
+            lib = ctypes.CDLL(target)
         if lib.vcdidx_abi_version() != _NATIVE_ABI_VERSION:
             return None
         lib.vcdidx_abi_build.restype = ctypes.c_int

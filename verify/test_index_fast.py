@@ -72,13 +72,17 @@ def test_fast_native_sidecar_matches_python(tmp_path):
     assert checks > 100
 
 
-def test_fast_kill_switch(tmp_path):
-    src = tmp_path / 'copy.vcd'
-    src.write_bytes(FIXTURES[0].read_bytes())
-    result = run_fast(['--json', 'index', str(src)],
-                      {'VCD_ANALYZER_NO_NATIVE': '1'})
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)['builder'] == 'python'
+def test_fast_unsupported_platform_falls_back():
+    """No knob: a platform without an embedded library silently uses the
+    pure-Python builder (the only supported way to reach it)."""
+    import vcd_analyzer_fast as fast
+    saved = fast._native_platform_key
+    fast._native_platform_key = lambda: None
+    try:
+        assert fast._NATIVE_INDEX_BUILD('whatever', 'whatever.idx', 8) is None
+        assert fast.native_index_build('whatever', 'whatever.idx', 8) is None
+    finally:
+        fast._native_platform_key = saved
 
 
 def test_fast_non_monotonic_clean_error(tmp_path):

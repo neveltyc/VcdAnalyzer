@@ -10,8 +10,7 @@
 # gate (index_advisable) says the index wins. The fast distribution variant
 # embeds a native builder library (C ABI via ctypes) and replaces the pure
 # Python build pass below; queries are identical either way. Disable with
-# VCD_ANALYZER_NO_INDEX=1 (never use) / VCD_ANALYZER_INDEXER=python
-# (never build natively).
+# VCD_ANALYZER_NO_INDEX=1 (never use).
 
 HEADER = struct.Struct('<8sQQQQQQ')
 BLOCK = struct.Struct('<QQqq')
@@ -718,12 +717,13 @@ def sidecar_path(vcd_path):
 def native_index_build(path, sidecar, block_bytes):
     """Build via the embedded native library (fast variant only).
 
-    Returns a stats dict, or None when no native builder is available
-    (the standard pure-Python file) — the caller falls back to
-    build_index(). VCD_ANALYZER_INDEXER=python forces the fallback.
+    Fully automatic: the pure-Python builder is the fallback for every
+    case the native path cannot serve — standard file without an embedded
+    part, unsupported platform, or any load failure inside the loader.
+    Returns None to signal that fallback.
     """
     build = globals().get('_NATIVE_INDEX_BUILD')
-    if build is None or os.environ.get('VCD_ANALYZER_INDEXER') == 'python':
+    if build is None:
         return None
     return build(path, sidecar, block_bytes)
 

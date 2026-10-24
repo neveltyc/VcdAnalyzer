@@ -158,12 +158,36 @@ ritual &mdash; drop it anywhere with Python 3.9+ and it works.
 ## Project layout
 
 ```
-vcd_analyzer.py       The tool (single file, stdlib only)
-verify/               pytest + unittest suite — 231 tests, 0 failures
+src/                  Source modules — edit here (Parts 1-8, see _make.py)
+_make.py              Assembler: concatenates src/ into vcd_analyzer.py (--check verifies)
+vcd_analyzer.py       Release artifact (single file, stdlib only; generated, do not edit)
+verify/               pytest + unittest suite — 249 tests, 0 failures
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
+.github/workflows/    CI: release file must match src/, tests on 3.9 and 3.13
 CHANGELOG.md          Compact changelog with links to detailed release notes
 ```
+
+## Development
+
+The single file is a generated artifact. Edit the modules under `src/`
+(`_preamble.py` holds the docstring, version and imports; the rest follow the
+Part numbering in `_make.py`), then rebuild and test before committing:
+
+```bash
+python _make.py && python -m pytest verify/ -q && python _make.py --check
+```
+
+CI rejects any commit where `vcd_analyzer.py` differs from a fresh assembly
+of `src/`. Only `_preamble.py` may contain module-level imports — the parts
+share one namespace by concatenation, and `_make.py --check` enforces this.
+
+Two release variants are planned: the **standard** file above (pure Python,
+today's behavior, unchanged) and a future **fast** variant that appends
+compressed native index-builder libraries (arm64-linux, x86-64-linux,
+arm64-macos, x86-64-windows; C ABI + ctypes, extracted and loaded at runtime,
+falling back to the pure-Python path whenever anything is missing). Both are
+assembled from the same `src/` so they evolve together.
 
 ## Tests
 

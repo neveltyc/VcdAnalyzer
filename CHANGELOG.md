@@ -3,6 +3,12 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
+## Unreleased
+
+### Changed
+
+- Development model: the release single file is now generated from the modules under `src/` by `_make.py` (byte-exact concatenation; `--check` compares). CI rejects a `vcd_analyzer.py` that differs from `src/`. No functional change — the assembled file differs from 1.5.6 only by Part banner comments (249 tests unchanged and green).
+
 ## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
 
 ### Fixed

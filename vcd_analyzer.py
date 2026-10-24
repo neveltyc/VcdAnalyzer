@@ -104,7 +104,10 @@ from collections import defaultdict
 from fractions import Fraction
 from functools import lru_cache
 
-# -- Time utilities ----------------------------------------------------------
+# ================================================================
+# Part 1: Time base, resource limits and shared tables
+# ================================================================
+
 
 _UNITS = {'fs': 1e-15, 'ps': 1e-12, 'ns': 1e-9, 'us': 1e-6, 'ms': 1e-3, 's': 1.0}
 # Exact unit sizes in femtoseconds. Time conversion and display use integer
@@ -498,7 +501,10 @@ def fmt_time(ts, ts_sec):
             return f'{scaled:g}{u}'
 
 
-# -- Value formatting --------------------------------------------------------
+# ================================================================
+# Part 2: Value formatting and filters
+# ================================================================
+
 
 def fmt_val(value, info):
     """Format signal value per IEEE 1364-2005 18.2.2.
@@ -652,7 +658,10 @@ def _glob_lite_regex(pattern):
     return re.compile('^' + ''.join(parts) + '$')
 
 
-# -- VCD Parser with bit-exploded signal reassembly -------------------------
+# ================================================================
+# Part 3: VCD parser
+# ================================================================
+
 
 # IEEE 1364-2005 declaration keywords that introduce a $<kw> ... $end section.
 _DECL_KEYWORDS = {'$timescale', '$scope', '$upscope', '$var',
@@ -1944,7 +1953,10 @@ class VCDParser:
 
 
 
-# -- Subcommands -------------------------------------------------------------
+# ================================================================
+# Part 4: Output helpers
+# ================================================================
+
 
 _DEFAULT_LIMIT = 500
 
@@ -2069,6 +2081,10 @@ def _selected_sids(vcd, sids):
 def _fmt_maybe(value, info):
     return fmt_val(value, info) if value is not None else '(undef)'
 
+
+# ================================================================
+# Part 5: Condition system and stream grouping
+# ================================================================
 
 def _parse_target_value(text):
     """Parse search/condition target once with bounded cost.
@@ -2840,6 +2856,10 @@ def _transition_groups(vcd, t0, t1, sids):
         yield cur_t, group
 
 
+# ================================================================
+# Part 6: Window summary
+# ================================================================
+
 def _summary_rows(vcd, t0, t1, sids):
     """Return (rows, undefined, counts) for window summary.
 
@@ -2996,6 +3016,10 @@ def _public_row(row, verbose=False):
         r['type'] = typ
     return r
 
+
+# ================================================================
+# Part 7: Commands
+# ================================================================
 
 def cmd_info(vcd, args):
     _limit(args)
@@ -3647,7 +3671,10 @@ def cmd_search(vcd, args):
         print('No {} in {}..{} where {}.'.format(
             noun, fmt_time(t0, ts), fmt_time(t1, ts), cond_text))
 
-# -- CLI entry ---------------------------------------------------------------
+# ================================================================
+# Part 8: CLI entry
+# ================================================================
+
 
 
 def _add_time_args(sp):

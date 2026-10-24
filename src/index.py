@@ -1006,10 +1006,16 @@ def maybe_auto_build(parser, vcd_path):
     """Spawn ONE detached background index build when worthwhile.
 
     Triggered from a normal query when no sidecar exists, or an existing
-    one is stale (source changed). A per-file O_EXCL lock guarantees a
+    one is stale (source changed). A per-file OS-file-lock guarantees a
     single builder at a time; VCD_ANALYZER_AUTO_INDEX=0 disables; a source
     that looks still-open-for-write (fresh mtime / lsof holder / Windows
     lock) is reported and left alone. Never blocks or fails the query.
+
+    Checks are ordered cheapest-first (review round 4): a fresh sidecar
+    needs nothing, a file below the gate floor can never pass (data <=
+    file size, so size pre-filters without the data_start header rescan),
+    a running builder or a live writer needs no native library — the
+    base85+lzma+dlopen load happens only right before the spawn.
     """
     if os.environ.get('VCD_ANALYZER_AUTO_INDEX', '1').lower() in ('0', 'false', 'no'):
         return
@@ -1017,20 +1023,15 @@ def maybe_auto_build(parser, vcd_path):
         return  # imported as a library: no script to respawn
     vcd_path = os.path.abspath(vcd_path)
     sidecar = sidecar_path(vcd_path)
-    # Cheap checks first: a fresh sidecar needs no library at all (loading
-    # it costs base85+lzma+dlopen on every new CLI process).
     if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
         return
-    # Without a native builder for this platform, an automatic build would
-    # run the much slower pure-Python pass and hurt more than help — auto
-    # building is OFF by default here; build explicitly with `index`
-    # (which says so and reports the slower mechanism).
-    loader = globals().get('_load_native_library')
-    if loader is None or loader() is None:
-        _warn('automatic index building is disabled on this platform (no '
-              'native builder); run the index command to build with the '
-              'slower pure-Python mechanism', cat='index_auto_no_native')
+    try:
+        if os.path.getsize(vcd_path) < 128 << 10:
+            return  # data <= size: below the gate floor, no header rescan
+    except OSError:
         return
+    if _build_in_progress(sidecar):
+        return  # a builder is already running for this file
     try:
         symbols = raw_symbols(parser)
         data = os.path.getsize(vcd_path) - data_start(vcd_path)
@@ -1044,8 +1045,17 @@ def maybe_auto_build(parser, vcd_path):
               '(rerun after the dump completes)'.format(vcd_path, held),
               cat='index_writer_holds:' + vcd_path)
         return
-    if _build_in_progress(sidecar):
-        return  # a builder is already running for this file
+    # Without a native builder for this platform, an automatic build would
+    # run the much slower pure-Python pass and hurt more than help — auto
+    # building is OFF by default here; build explicitly with `index`
+    # (which says so and reports the slower mechanism). Loaded LAST: only
+    # a query that is about to spawn a builder pays for it.
+    loader = globals().get('_load_native_library')
+    if loader is None or loader() is None:
+        _warn('automatic index building is disabled on this platform (no '
+              'native builder); run the index command to build with the '
+              'slower pure-Python mechanism', cat='index_auto_no_native')
+        return
     log = None
     try:
         try:

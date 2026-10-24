@@ -147,3 +147,40 @@ def _run_cli(args, env_extra=None):
     import subprocess
     from conftest import run_cli as _rc
     return _rc(args)
+
+
+def test_small_file_never_loads_native_library(tmp_path, monkeypatch):
+    """Order regression (round-4/5 review): a sub-gate file with no sidecar
+    must be rejected by the size pre-filter BEFORE the native library
+    load — small-file queries never pay lzma+dlopen."""
+    monkeypatch.setattr(va, '_AUTO_SCRIPT_PATH', str(Path(__file__).resolve().parents[1] / 'vcd_analyzer.py'))
+    small = tmp_path / 'tiny.vcd'
+    small.write_text('$timescale 1ns $end $scope module top $end $var wire 1 ! a $end '
+                     '$upscope $end $enddefinitions $end #0 0! #5 1!')
+    old = time.time() - 3600
+    os.utime(small, (old, old))
+    va._warned.clear()
+    called = []
+    real = va._load_native_library
+    monkeypatch.setattr(va, '_load_native_library',
+                        lambda: called.append(1) or real())
+    va.maybe_auto_build(va.VCDParser(str(small)), str(small))
+    assert called == [], 'native library loaded for a sub-gate file'
+    assert not os.path.exists(va.sidecar_path(small))
+
+
+def test_gate_file_loads_native_last(tmp_path, monkeypatch):
+    """The gate-passing path DOES reach the native loader (after all cheap
+    checks) — the reorder must not have disabled auto-build entirely."""
+    from test_index import _big_vcd
+    monkeypatch.setattr(va, '_AUTO_SCRIPT_PATH', str(Path(__file__).resolve().parents[1] / 'vcd_analyzer.py'))
+    src = _big_vcd(tmp_path)
+    old = time.time() - 3600
+    os.utime(src, (old, old))
+    va._warned.clear()
+    called = []
+    real = va._load_native_library
+    monkeypatch.setattr(va, '_load_native_library',
+                        lambda: called.append(1) or real())
+    va.maybe_auto_build(va.VCDParser(str(src)), str(src))
+    assert called, 'gate-passing file never reached the native loader'

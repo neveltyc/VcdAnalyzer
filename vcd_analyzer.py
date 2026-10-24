@@ -2051,7 +2051,7 @@ def tokens(fd, start, end, counters=None, chunk_size=1 << 20):
 
 
 def data_start(path):
-    fd = os.open(path, os.O_RDONLY)
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
     try:
         iterator = tokens(fd, 0, os.fstat(fd).st_size)
         keyword = None
@@ -2333,7 +2333,7 @@ class IndexedVCD(VCDParser):
         if (_magic not in (MAGIC, MAGIC2) or _size != _st.st_size
                 or _mtime != _st.st_mtime_ns):
             raise ValueError('stale index')
-        self.fd = os.open(path, os.O_RDONLY)
+        self.fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
         try:
             self.index_file = open(sidecar, 'rb')
             self.mapping = mmap.mmap(self.index_file.fileno(), 0, access=mmap.ACCESS_READ)

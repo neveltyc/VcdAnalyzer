@@ -7,7 +7,7 @@ description: VCD waveform analysis for RTL debug. Use when the user has a .vcd f
 
 ## What this tool does
 
-`vcd_analyzer.py` is a single-file, zero-dependency Python CLI that parses IEEE 1364 VCD files and exposes seven query commands. It streams value changes, handles QuestaSim bit-exploded buses and Extended VCD port states, and applies resource limits to malformed/hostile inputs.
+`vcd_analyzer.py` is a single-file, zero-dependency Python CLI that parses IEEE 1364 VCD files and exposes eight commands. It streams value changes, handles QuestaSim bit-exploded buses and Extended VCD port states, and applies resource limits to malformed/hostile inputs.
 
 All commands support `--json` for structured output. **Always use `--json` when calling from an agent.**
 
@@ -143,13 +143,12 @@ Key JSON fields: `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`. Only signals 
 python3 vcd_analyzer.py index <file> [--block-mib 8] [--force] [--output PATH]
 ```
 
-Builds `<file>.vcidx` (~0.1-0.25% of the source; a 10 GB dump takes ~5 s).
-All query commands use it automatically when fresh — no command changes, no
-output changes. If the sidecar is missing, the first query on a big file
-starts a background build by itself (one per file; `VCD_ANALYZER_AUTO_INDEX=0`
-disables). Staleness is detected via `(size, mtime_ns)`; if the dump still
-looks open for writing, the rebuild is skipped with a message. The lite
-build answers `index` with an explicit "full variant only" error.
+Builds `<file>.vcidx`. Every query command then uses it automatically when
+fresh — output unchanged, big-dump point queries become sub-second. If you
+never run it, the first query on a big file starts a background build by
+itself (`VCD_ANALYZER_AUTO_INDEX=0` disables). Rebuild is skipped with a
+message while the dump still looks open for writing. Key JSON fields:
+`builder`, `index_bytes`, `blocks`, `build_s`.
 
 ### 8. search — condition-based query (three modes)
 

@@ -10,7 +10,6 @@
   <img alt="Version" src="https://img.shields.io/badge/版本-1.6.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/测试-272%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -66,10 +65,13 @@ python vcd_analyzer.py index sim.vcd
 
 两个单文件，零依赖，Python 3.9+。
 
-**`vcd_analyzer.py` —— 完整版（默认）。** 以上全部功能外加索引 sidecar。
-内嵌了 arm64/x86-64 Linux、arm64 macOS、x86-64 Windows 的预构建原生库
-（纯 64 位；Linux 需 glibc ≥ 2.17），运行时自动解压并校验——单个约 1.6MB
-的文件，依然零安装。
+| | **完整版** `vcd_analyzer.py`（默认） | **精简版** `vcd_analyzer_lite.py` |
+|:--|:--|:--|
+| 七个查询命令、输出与语义 | 完全一致 | 完全一致 |
+| 巨型文件的索引加速 | ✅ 自动构建、自动使用 | ❌ `index` 命令明确提示改用完整版 |
+| 多核原生索引构建器 | ✅ 内嵌（arm64/x86-64 Linux、arm64 macOS、x86-64 Windows） | 纯 Python |
+| 文件大小 | 约 1.6 MB | 约 180 KB |
+| 环境要求 | Python 3.9+（Linux 需 glibc ≥ 2.17） | Python 3.9+ |
 
 ```bash
 # 最新版（完整版）
@@ -78,15 +80,10 @@ curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analy
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
 
-python vcd_analyzer.py --version
-```
-
-**`vcd_analyzer_lite.py` —— 精简版。** 约 180KB 的纯 Python 程序，
-保持 1.5.6 行为：没有索引功能（`index` 命令会明确提示改用完整版），
-其余查询输出与完整版完全一致。
-
-```bash
+# 精简版（纯 Python，无索引功能）
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
+
+python vcd_analyzer.py --version
 ```
 
 无需 pip、无需虚拟环境、无需 PyPI。只要有 curl 和 Python 3.9+ 就能用——适合 CI 容器、EDA 服务器、Docker 构建、Agent 工具链。
@@ -122,10 +119,9 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ## 索引 sidecar（完整版）
 
 - **显式或自动。** `vcd_analyzer.py index sim.vcd` 生成 `sim.vcd.vcidx`
-  （约为源文件的 0.1-0.25%；原生构建器 4 线程 10GB 约 5 秒，无内嵌库的
-  平台回退纯 Python 约需数分钟）。也可以什么都不做：对未索引的大文件的
-  第一次查询会自动在后台构建（每文件单飞、带锁），下一次查询就快了。
-- **查询自动使用**新鲜的索引；输出与纯解析器逐字节一致，只是更快。
+  （约为源文件的百分之一都不到；10GB 级 dump 只需几秒）。也可以什么都不做：
+  对未索引的大文件的第一次查询会自动在后台构建，下一次查询就快了。
+- **查询自动使用**新鲜的索引；输出完全一致，只是更快（分钟级点查询变亚秒级）。
 - **新鲜度以 `(文件大小, 纳秒级 mtime)` 判定**，记录在索引头部——每条查询
   O(1)，不做内容哈希。索引陈旧时警告一次并由纯解析器回答；源文件疑似仍在
   被写入时（mtime < 5 秒、lsof 显示被持有、Windows 共享冲突）自动重建被
@@ -184,7 +180,7 @@ _make.py              打包器：从 src/ 生成两个发行文件（--check �
 vcd_analyzer.py       发行物：完整版（生成文件，勿手改）
 vcd_analyzer_lite.py  发行物：精简版，纯 Python（生成文件）
 native/               Rust 索引构建器 crate + 交叉编译脚本
-verify/               pytest + unittest 测试套件 —— 272 个用例，0 失败
+verify/               pytest + unittest 测试套件
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
 .github/workflows/    CI：两个发行文件必须与 src/ 一致，3.9-3.13 测试
@@ -213,28 +209,8 @@ python -m unittest discover -s verify -p "test_cli.py"
 
 技能涵盖完整命令参考、决策树、五个工作流模式、条件语法、错误恢复和环境变量调优。
 
-## 版本历史
-
-详细变更见 [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) 页面。快速概览见 [CHANGELOG.md](CHANGELOG.md)。
-
-| 版本 | 亮点 |
-|:------|:-----|
-| `1.6.0` | 巨型 dump 的索引 sidecar（完整版）：单文件内嵌多核原生构建器、后台自动构建、点查询秒回；`src/` 维护模型生成发行文件；精简版保留纯 Python 1.5.6 行为 |
-| `1.5.6` | 位拆分总线每个时刻只变化一次，任意起始位的连续位段可重组；时间输出与解析精确；向量按完整位宽比较；`summary` 计数与 `changed()` 一致；BOM 与 `$timescale` 警告 |
-| `1.5.5` | 修正过滤列表计数和搜索 OR 事件；拒绝空波形及非法时间/过滤参数；限制 token 长度、避免 glob 回溯，无限量结果改用临时文件 |
-| `1.5.4` | `search` 目标值支持不关心位:二进制字面量中的 `?` 匹配任意位值,同 Verilog `casez`(`status=b?????1??` 检查 8 位总线的第 2 位),无需 dump 整条总线即可按单个位或位段搜索 |
-| `1.5.3` | `search` 支持负数目标值:负实数可匹配 real 信号(`dac=-1.5`),逻辑信号上的负十进制数按声明位宽的二进制补码匹配(`cnt=-1`、`sbyte=-5`;VCD 不记录有无符号);4 态目标值可带多余前导零;非 ASCII 数字目标值改为正常报错而非抛出 traceback |
-| `1.5.2` | 修复 `dump --begin` 凭空报出跳变:从文件中间开始的追赶扫描现在会把 no-op 基线带到窗口边界,因此 `$dumpall`/`$dumpon` 检查点重播当前值(iverilog 默认就会输出)不再被计为变化,与全量扫描一致 |
-| `1.5.1` | 解析器保留非有限实数值(`inf`/`-inf`/`nan`,含 C99 `nan(payload)` 形式如 `nan(ind)`,此前整条记录被静默丢弃);`summary` 的单信号 unique 集合加上限(`VCD_ANALYZER_MAX_UNIQUE_VALUES`,默认 65536,超限时以 `unique_is_exact: false` 标注下界);Ctrl-C 以 130 干净退出而非打印堆栈;stdout/stderr 强制 UTF-8 |
-| `1.5.0` | `changed(SIG)` 边沿谓词取代 `--changed` 标志;`--condition` 可重复以 OR 子句;条件匹配依据信号声明类型(修复 real 信号的假阳/假阴);无法成立的条件目标改为报错而非静默无匹配;`--limit` 默认值改为 500,截断提示更清晰 |
-| `1.4.0` | 内部重构:将事件流与派生状态分层为解析器的三个不同视图(`iter_events` 原始 / `iter_transitions` / `state_at` 快照);所有命令输出不变,值变化热路径略快 |
-| `1.3.20` | 保留同一时间戳内的多次值变化;`info` 时间范围改用单一前向扫描器(与解析器等价,约快 1.5×,能扛超大/`$dumpall` 尾部);`search --changed` 逐次计数;`info` 的 `--limit` 校验与空数据输出 |
-| `1.3.19` | 修复自由格式 VCD 正确性:一行多声明/多时间戳、静默窗口搜索、非法令牌级联、`$dumpall` 跳变计数 |
-| `1.3.18` | 修复 `info` 在缩进 VCD 文件上 `time_max` 塌缩为 `time_min` 的问题 |
-| `1.3.17` | $var 解析器常见形态快路径(跳过括号扫描) |
-| `1.3.16` | 在值变化热路径上内联超宽钳制判断 |
-| `1.3.15` | 分块数据词法分析与单行头部声明快路径 |
-| `1.3.14` | dump 文本输出改为流式;新增基准测试工具 |
+各版本详细变更见 [CHANGELOG.md](CHANGELOG.md) 与
+[GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) 页面。
 
 ## 许可证
 

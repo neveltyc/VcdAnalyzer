@@ -10,7 +10,6 @@
   <img alt="Version" src="https://img.shields.io/badge/version-1.6.0-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-272%20passed-22aa55?style=flat-square">
 </p>
 
 ---
@@ -70,10 +69,13 @@ python vcd_analyzer.py index sim.vcd
 
 Two single files, no dependencies, Python 3.9+.
 
-**`vcd_analyzer.py` — full (the default).** Everything above, plus the index
-sidecar. It embeds prebuilt native builder libraries for arm64/x86-64 Linux,
-arm64 macOS and x86-64 Windows (64-bit; Linux needs glibc ≥ 2.17), extracted
-and checksum-verified automatically — one ~1.6 MB file, still zero installs.
+| | **full** — `vcd_analyzer.py` (default) | **lite** — `vcd_analyzer_lite.py` |
+|:--|:--|:--|
+| Seven query commands, output and semantics | identical | identical |
+| Index sidecar acceleration for huge dumps | ✅ built and used automatically | ❌ `index` answers with a pointer to the full file |
+| Native multi-core index builder | ✅ embedded (arm64/x86-64 Linux, arm64 macOS, x86-64 Windows) | pure Python only |
+| File size | ~1.6 MB | ~180 KB |
+| Requirements | Python 3.9+ (Linux needs glibc ≥ 2.17) | Python 3.9+ |
 
 ```bash
 # Latest (full)
@@ -82,15 +84,10 @@ curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analy
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
 
-python vcd_analyzer.py --version
-```
-
-**`vcd_analyzer_lite.py` — lite.** The pure-Python program (~180 KB) with the
-1.5.6 behavior: no index feature (the `index` command answers with a clear
-pointer to the full file), identical query output otherwise.
-
-```bash
+# Lite (pure Python, no index feature)
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
+
+python vcd_analyzer.py --version
 ```
 
 No pip, no venv, no PyPI. Works anywhere curl and Python 3.9+ are available — CI containers, EDA servers, Docker builds, agent toolchains.
@@ -126,12 +123,11 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ## The index sidecar (full variant)
 
 - **Explicit or automatic.** `vcd_analyzer.py index sim.vcd` builds `sim.vcd.vcidx`
-  (~0.1-0.25% of the source; 10 GB in ~5 s with the native builder's 4 threads,
-  or ~6 min with the pure-Python fallback on platforms without an embedded
-  library). Or do nothing: the first query on a big unindexed dump spawns a
-  background build (one per file, lock-guarded) and the next query is fast.
+  (a fraction of a percent of the source; seconds for a 10 GB dump). Or do
+  nothing: the first query on a big unindexed dump starts a background build —
+  the next query is fast.
 - **Queries use it automatically** whenever the sidecar is fresh; output is
-  byte-identical to the plain parser, only faster.
+  identical, only faster (minutes-long point lookups become sub-second).
 - **Freshness is `(size, mtime_ns)`** recorded in the sidecar header — O(1) per
   query, no content hashing. A stale sidecar warns once and the plain parser
   answers; an automatic rebuild is skipped (with a message) while the source
@@ -204,7 +200,7 @@ _make.py              Assembler: builds both release files from src/ (--check ve
 vcd_analyzer.py       Release artifact: FULL variant (generated; do not edit)
 vcd_analyzer_lite.py  Release artifact: LITE variant, pure Python (generated)
 native/               Rust index-builder crate + cross-build script (cargo-zigbuild)
-verify/               pytest + unittest suite — 272 tests, 0 failures
+verify/               pytest + unittest test suite
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
 .github/workflows/    CI: both release files must match src/, tests on 3.9-3.13
@@ -253,29 +249,8 @@ parse JSON output, and follow proven debug workflows.
 The skill covers the full command reference, decision tree, five workflow
 patterns, condition syntax, error recovery, and environment variable tuning.
 
-## Version history
-
-Full per-version notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page. See [CHANGELOG.md](CHANGELOG.md) for a quick overview.
-
-| Version | Highlight |
-|:--------|:----------|
-| `1.6.0` | Index sidecar for huge dumps (full variant): native multi-core builder embedded as one file, automatic background builds, instant point queries; `src/` maintenance model with generated release files; lite variant for pure-Python 1.5.6 behavior |
-| `1.5.6` | Bit-exploded buses change once per tick and contiguous runs from any bit are reassembled; exact time output and parsing; full-width vector comparison; `summary` counts match `changed()`; BOM/`$timescale` warnings |
-| `1.5.5` | Correct filtered-list counts and search OR events; reject empty waveforms and malformed time/filter arguments; bound token sizes, avoid glob backtracking, and spool unlimited output |
-| `1.5.4` | `search` targets accept don't-care bits: `?` in a binary literal matches any bit value, as in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus), so single bits and fields of a bus can be searched without dumping the whole bus |
-| `1.5.3` | `search` accepts negative targets: a negative real matches real signals (`dac=-1.5`), and a negative decimal on a logic signal means its two's-complement pattern in the declared width (`cnt=-1`, `sbyte=-5`; VCD records no signedness); 4-state targets may carry extra leading zeros; a non-ASCII digit target is a clean error instead of a traceback |
-| `1.5.2` | `dump --begin` no longer invents value changes: the mid-file catch-up scan carries the no-op baseline across the window edge, so a `$dumpall`/`$dumpon` checkpoint re-asserting current values — iverilog emits one by default — stays a no-op exactly as in a full scan |
-| `1.5.1` | Parser keeps non-finite real values (`inf`/`-inf`/`nan`, including C99 `nan(payload)` forms like `nan(ind)` — previously the whole record was silently dropped); `summary` caps its per-signal unique-value set (`VCD_ANALYZER_MAX_UNIQUE_VALUES`, default 65536, lower bound flagged as `unique_is_exact: false`); Ctrl-C exits 130 instead of a traceback; stdout/stderr forced to UTF-8 |
-| `1.5.0` | `changed(SIG)` edge predicate replaces the `--changed` flag; repeatable `--condition` ORs clauses; condition matching follows the signal's declared type (fixes real-signal false positives/negatives); unusable condition targets are rejected instead of silently unmatched; `--limit` default 500 with a clearer truncation notice |
-| `1.4.0` | Internal refactor: separate the event stream from derived state into three distinct parser views (`iter_events` raw / `iter_transitions` / `state_at` snapshots); no change to any command's output, value-change hot path slightly faster |
-| `1.3.20` | Preserve intra-timestamp value changes; rebuild `info`'s time range on one forward scanner (parser-parity, ~1.5× faster, survives huge/`$dumpall` tails); `search --changed` counts each change; `info` `--limit` validation and empty-data output |
-| `1.3.19` | Fix free-format VCD correctness: multi-declaration/timestamp-per-line, quiet-window search, rejected-token cascade, `$dumpall` change count |
-| `1.3.18` | Fix `info` `time_max` collapsing to `time_min` on indented VCD files |
-| `1.3.17` | Common-shape fast path in the `$var` parser (skip bracket scans) |
-| `1.3.16` | Inline the over-wide clamp guard on the value-change hot path |
-| `1.3.15` | Chunked data tokenizer and one-line header fast path |
-| `1.3.14` | Stream `dump` text output; add benchmark harness |
-
+Per-release details live in [CHANGELOG.md](CHANGELOG.md) and on the
+[GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
 ## License
 

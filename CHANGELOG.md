@@ -19,7 +19,9 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 - Background auto-build: a query that finds no sidecar (or a stale one) spawns ONE detached
   builder per file (O_EXCL lock, dead-owner reclaim, `VCD_ANALYZER_AUTO_INDEX=0` disables);
   a source that looks still-open-for-write (fresh mtime, lsof holder, Windows sharing
-  violation) is reported and left alone.
+  violation) is reported and left alone. On platforms without an embedded native builder,
+  automatic builds are off by default — they would only run the much slower pure-Python
+  pass; the `index` command still works there and reports which mechanism it used.
 - `index --output PATH` stores the sidecar anywhere and symlinks `<file>.vcidx` to it
   (never deletes a pre-existing regular file; link/build failures are reported, never fatal).
 - `vcd_analyzer_lite.py`: the pure-Python 1.5.6-behavior build — same queries, no index
@@ -34,6 +36,20 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
   structural check of the embedded native part). CI rejects drifted release files.
 - Sidecar freshness is `(size, mtime_ns)` recorded at build time — O(1) per query, no
   content hashing; the builder aborts if the source changes mid-build.
+
+### Fixed
+
+- Sidecars are published atomically (temporary file + rename) by both builders; a truncated
+  or corrupt sidecar is reported once and every command falls back to the plain parser
+  instead of crashing.
+- Tolerated malformed timestamps (`#1.5`-style tokens) no longer corrupt multi-threaded
+  index builds (split points must now be fully-parsed timestamps that are not declared
+  identifiers) and no longer act as bit-exploded-bus commit points in the indexed stream.
+- A stale sidecar no longer leaks the source file descriptor — the leak made `lsof` report
+  the tool itself as the writer and permanently blocked automatic rebuilds.
+- The embedded-library cache re-verifies checksums before loading; `--block-mib` is
+  validated (1..4096); sources with pre-1970 mtimes are refused instead of producing a
+  permanently-stale sidecar.
 
 ## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
 

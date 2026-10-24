@@ -32,7 +32,7 @@ def maybe_auto_build(parser, vcd_path):
     return None
 
 
-def build_index_best(path, sidecar, block_bytes=8 << 20):
+def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
     sys.exit('Error: ' + _FAST_ONLY)
 
 

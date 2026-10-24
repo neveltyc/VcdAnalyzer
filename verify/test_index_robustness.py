@@ -14,6 +14,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vcd_analyzer as va
+from conftest import run_cli
+from test_index import _big_vcd
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -125,3 +127,84 @@ def test_block_mib_bounds(tmp_path, mib):
     result = run_cli(['index', str(src), '--block-mib', str(mib)])
     assert result.returncode != 0
     assert '--block-mib' in result.stderr
+
+
+# ---- second-round review regressions --------------------------------------
+
+def test_output_may_not_be_the_vcd_itself(tmp_path):
+    """--output pointing at the input VCD must be refused BEFORE any build:
+    publication would replace the waveform with the sidecar (P0)."""
+    import hashlib
+    from conftest import run_cli
+    src = _big_vcd(tmp_path)
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    result = run_cli(['index', str(src), '--output', str(src), '--force'])
+    assert result.returncode != 0
+    assert 'must not be the VCD file itself' in result.stderr
+    assert hashlib.sha256(src.read_bytes()).hexdigest() == digest
+
+
+def test_failed_rebuild_keeps_previous_sidecar(tmp_path, monkeypatch):
+    """A failed rebuild must leave a pre-existing target untouched: builders
+    clean their own temp files, never the published target (P1). The failure
+    is injected in the CLI subprocess via VCD_ANALYZER_FAIL_INDEX (a test
+    hook honored only when the env var is set)."""
+    src = _big_vcd(tmp_path)
+    sidecar = Path(va.sidecar_path(src))
+    va.build_index(src, sidecar, 64)
+    good = sidecar.read_bytes()
+    monkeypatch.setenv('VCD_ANALYZER_FAIL_INDEX', '1')
+    result = run_cli(['index', str(src), '--force'])
+    assert result.returncode != 0
+    assert sidecar.read_bytes() == good, 'failed rebuild destroyed the old sidecar'
+
+
+def test_comment_body_never_becomes_split_anchor(tmp_path):
+    """$comment bodies may legally contain '#<digits>' text; the parallel
+    builder must not anchor a worker split there (section census gate)."""
+    path = tmp_path / 'cmt.vcd'
+    with open(path, 'w') as out:
+        out.write('$timescale 1ps $end $scope module top $end '
+                  '$var wire 1 ! a $end $upscope $end $enddefinitions $end\n')
+        t = 0
+        while path.stat().st_size < 1 << 20:
+            out.write('#%d\n0!\n$comment rebuild at #%d pending $end\n1!\n' % (t, t + 1))
+            t += 2
+    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
+               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
+         str(path), '--output', str(tmp_path / 's.idx'), '--block-mib', '1'],
+        capture_output=True, text=True, env=env, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['threads'] == 1  # census forced single
+    idx = va.IndexedVCD(path, tmp_path / 's.idx', enforce_gate=False)
+    raw = va.VCDParser(str(path))
+    try:
+        span = idx.blocks[-1][3]
+        for frac in (10, 50, 90):
+            a = span * frac // 100
+            assert (list(raw.iter_transitions(a, a + max(1, span // 100), None))
+                    == list(idx.iter_transitions(a, a + max(1, span // 100), None)))
+    finally:
+        idx.close()
+
+
+def test_corrupt_directory_mode_detected_at_load(tmp_path):
+    """Damage the DIRECTORY flags byte (not the file tail): try_index must
+    reject at load time on a gate-passing file (P1, and the old test could
+    not detect this at all)."""
+    src = _big_vcd(tmp_path)
+    va.build_index(src, va.sidecar_path(src), 64)
+    assert va.try_index(src) is not None  # baseline: fresh and usable
+    data = bytearray(Path(va.sidecar_path(src)).read_bytes())
+    # directory entry for symbol 0: header(56) + blocks(32*nb) + 0*16 + 8 = mode
+    nb = va.VCDParser(str(src)).scan_time_range()  # touch parser; nb via sidecar
+    head = va.HEADER.unpack_from(bytes(data), 0)
+    nb = head[4]
+    off = 56 + 32 * nb + 8  # location(8) | count(4) | mode(4)
+    data[off + 12] = 0x63  # 'c' — not a valid posting mode
+    Path(va.sidecar_path(src)).write_bytes(bytes(data))
+    va._warned.clear()
+    assert va.try_index(src) is None

@@ -375,27 +375,54 @@ class IndexedVCD(VCDParser):
         self.fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
         try:
             self.index_file = open(sidecar, 'rb')
-            self.mapping = mmap.mmap(self.index_file.fileno(), 0, access=mmap.ACCESS_READ)
-            magic, size, mtime, self.block_bytes, nb, ns, self.begin_offset = HEADER.unpack_from(self.mapping)
+            self.mapping = mmap.mmap(self.index_file.fileno(), 0,
+                                     access=mmap.ACCESS_READ)
+            (magic, size, mtime, self.block_bytes, nb, ns,
+             self.begin_offset) = HEADER.unpack_from(self.mapping)
+            stat = os.fstat(self.fd)
+            if (magic not in (MAGIC, MAGIC2) or size != stat.st_size
+                    or mtime != stat.st_mtime_ns):
+                raise ValueError('stale index')
+            self.file_size = size
+            self.symbols = raw_symbols(self)
+            if ns != len(self.symbols):
+                raise ValueError('signal directory mismatch')
+            self.raw_id = {sid: k for k, sid in enumerate(self.symbols)}
+            # Full structural validation NOW, not at first corrupt read:
+            # a damaged directory (bad mode byte, postings past EOF,
+            # non-monotonic block ends) must fall back to the plain parser
+            # here, never surface as KeyError/struct.error mid-query.
+            if nb * BLOCK.size + HEADER.size > len(self.mapping):
+                raise ValueError('truncated block table')
+            self.blocks = [BLOCK.unpack_from(
+                self.mapping, HEADER.size + k * BLOCK.size) for k in range(nb)]
+            self.ends = [b[3] for b in self.blocks]
+            prev_end = -1
+            for _s, _e, t0, t1 in self.blocks:
+                if t1 < t0 or t0 < prev_end or _e < _s:
+                    raise ValueError('corrupt block table')
+                prev_end = t1
+            self.directory_start = directory_start = HEADER.size + nb * BLOCK.size
+            # selected-signal -> raw identifier mapping (bit buses included)
+            self.sources = {sid: {sid} for sid, info in self.signals.items()
+                            if not info.get('synthesized')}
+            for sym, refs in self._bit_map.items():
+                for gid, _bit in refs:
+                    self.sources.setdefault(gid, set()).add(sym)
+            blob_start = directory_start + ns * DIRECTORY.size
+            if blob_start > len(self.mapping):
+                raise ValueError('truncated directory')
+            for k in range(ns):
+                location, count, flags = DIRECTORY.unpack_from(
+                    self.mapping, directory_start + k * DIRECTORY.size)
+                if flags not in ENTRY:
+                    raise ValueError('corrupt posting mode')
+                _fmt, esize, _runs = ENTRY[flags]
+                if location < blob_start or location + count * esize > len(self.mapping):
+                    raise ValueError('posting range out of bounds')
         except Exception:
             self.close()
             raise
-        stat = os.fstat(self.fd)
-        if magic not in (MAGIC, MAGIC2) or size != stat.st_size or mtime != stat.st_mtime_ns:
-            self.close()
-            raise ValueError('stale index')
-        self.file_size = size
-        self.symbols = raw_symbols(self)
-        if ns != len(self.symbols):
-            raise ValueError('signal directory mismatch')
-        self.raw_id = {sid: i for i, sid in enumerate(self.symbols)}
-        self.blocks = [BLOCK.unpack_from(self.mapping, HEADER.size+i*BLOCK.size) for i in range(nb)]
-        self.ends = [b[3] for b in self.blocks]
-        self.directory_start = HEADER.size + nb*BLOCK.size
-        self.sources = {sid: {sid} for sid, info in self.signals.items() if not info.get('synthesized')}
-        for sym, refs in self._bit_map.items():
-            for gid, _bit in refs:
-                self.sources.setdefault(gid, set()).add(sym)
         self.reset_counters()
         self._advisable = None
     def close(self):
@@ -450,7 +477,7 @@ class IndexedVCD(VCDParser):
         if lo == 0: return None
         bid,second = entry.unpack_from(self.mapping, location+(lo-1)*size)
         return (min(block,second-1),None) if runs else (bid,second)
-    def candidate_blocks(self, required, t0, t1):
+    def candidate_blocks(self, required, t0, t1, include_range=False):
         blocks = set()
         ranges = set()
         first = bisect.bisect_left(self.ends, t0)
@@ -485,6 +512,12 @@ class IndexedVCD(VCDParser):
                 if t1 is not None and self.blocks[bid][2]>t1:break
                 blocks.add(bid);lo+=1
         for a,b in ranges:blocks.update(range(a,b))
+        if include_range and blocks:
+            # Bit-exploded buses commit at EVERY top-level '#T' — including
+            # ones in blocks whose only content is a timestamp (no postings,
+            # so they would otherwise be skipped). Until blocks carry a
+            # has-timestamp bitmap, bus selections read the whole span.
+            return list(range(min(blocks), max(blocks) + 1))
         return sorted(blocks)
     def block_items(self, bid):
         start,end,t0,_t1 = self.blocks[bid]
@@ -655,7 +688,7 @@ class IndexedVCD(VCDParser):
             return
         required=self.selected_raw(sids)
         if not required:return
-        candidates=self.candidate_blocks(required,t0,t1)
+        candidates=self.candidate_blocks(required,t0,t1,include_range=bool(self._bit_state_template))
         # When all of the file is relevant, its existing split-based scanner
         # is faster than the experimental position-aware decoder.
         if t0==0 and t1 is None and sum(self.blocks[b][1]-self.blocks[b][0] for b in candidates)>=0.8*(self.file_size-self.begin_offset):
@@ -756,8 +789,12 @@ def native_index_build(path, sidecar, block_bytes):
     return build(path, sidecar, block_bytes)
 
 
-def build_index_best(path, sidecar, block_bytes=8 << 20):
+def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
     """Native build when the running file carries one, pure Python else."""
+    if os.environ.get('VCD_ANALYZER_FAIL_INDEX'):
+        raise ValueError('simulated index failure (VCD_ANALYZER_FAIL_INDEX)')
+    if threads is not None:
+        os.environ['VCD_ANALYZER_INDEX_THREADS'] = str(threads)
     try:
         stats = native_index_build(path, sidecar, block_bytes)
     except ValueError as error:
@@ -861,7 +898,7 @@ def _lock_stale(lock, max_age=3600.0):
     """True when the build lock's owner is gone (dead pid / ancient)."""
     try:
         with open(lock) as f:
-            pid = int(f.read().strip() or 0)
+            pid = int(f.read().split()[0] or 0)
         if pid and pid != os.getpid():
             if sys.platform != 'win32':
                 try:
@@ -878,12 +915,17 @@ def _lock_stale(lock, max_age=3600.0):
 
 
 def _acquire_build_lock(sidecar):
+    """Create the single-flight lock; content is 'pid token'. The token
+    stays with the build job across the spawner->builder handoff, so a
+    dead spawner PID cannot get the lock stolen while its builder still
+    runs, and a builder only releases a lock it still owns."""
     lock = sidecar + '.lock'
+    token = '%x' % os.urandom(8).hex()[0:16].__len__() if False else os.urandom(8).hex()
     for _attempt in (0, 1):
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             with os.fdopen(fd, 'w') as f:
-                f.write(str(os.getpid()))
+                f.write('{} {}'.format(os.getpid(), token))
             return lock
         except FileExistsError:
             if _attempt == 0 and _lock_stale(lock):
@@ -911,6 +953,12 @@ def maybe_auto_build(parser, vcd_path):
         return
     if _AUTO_SCRIPT_PATH is None:
         return  # imported as a library: no script to respawn
+    vcd_path = os.path.abspath(vcd_path)
+    sidecar = sidecar_path(vcd_path)
+    # Cheap checks first: a fresh sidecar needs no library at all (loading
+    # it costs base85+lzma+dlopen on every new CLI process).
+    if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
+        return
     # Without a native builder for this platform, an automatic build would
     # run the much slower pure-Python pass and hurt more than help — auto
     # building is OFF by default here; build explicitly with `index`
@@ -920,10 +968,6 @@ def maybe_auto_build(parser, vcd_path):
         _warn('automatic index building is disabled on this platform (no '
               'native builder); run the index command to build with the '
               'slower pure-Python mechanism', cat='index_auto_no_native')
-        return
-    vcd_path = os.path.abspath(vcd_path)
-    sidecar = sidecar_path(vcd_path)
-    if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
         return
     try:
         symbols = raw_symbols(parser)
@@ -947,11 +991,15 @@ def maybe_auto_build(parser, vcd_path):
             log = open(sidecar + '.log', 'a')
         except OSError:
             log = None
+        with open(lock) as f:
+            token = f.read().split()[1]
+        env = dict(os.environ)
+        env['VCD_ANALYZER_INDEX_TOKEN'] = token
         subprocess.Popen(
             [sys.executable, _AUTO_SCRIPT_PATH, 'index', vcd_path, '--auto'],
             stdout=log if log is not None else subprocess.DEVNULL,
             stderr=subprocess.STDOUT if log is not None else subprocess.DEVNULL,
-            start_new_session=True, close_fds=True)
+            start_new_session=True, close_fds=True, env=env)
         _warn('{}: building index in the background '
               '(VCD_ANALYZER_AUTO_INDEX=0 disables)'.format(vcd_path),
               cat='index_autobuild:' + vcd_path)

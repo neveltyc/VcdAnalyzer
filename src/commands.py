@@ -14,24 +14,41 @@ def cmd_index(vcd, args):
     """
     sidecar = sidecar_path(args.file)
     target = os.path.abspath(args.output) if args.output else sidecar
+    if args.output:
+        # --output pointing at the input VCD would REPLACE the waveform
+        # with the sidecar at publication; --force must not bypass this.
+        same = (os.path.realpath(target) == os.path.realpath(args.file)
+                or (os.path.exists(target)
+                    and os.path.exists(args.file)
+                    and os.path.samefile(target, args.file)))
+        if same:
+            sys.exit('Error: --output must not be the VCD file itself')
     auto = bool(getattr(args, 'auto', False))
     lock = sidecar + '.lock'  # created by the spawner in --auto mode
+    token = os.environ.get('VCD_ANALYZER_INDEX_TOKEN') if auto else None
+    if auto:
+        try:
+            with open(lock) as f:
+                owner = f.read().split()
+        except (OSError, IndexError):
+            owner = []
+        # Not our job anymore (stolen/recreated by another spawner): leave
+        # quietly without touching the new owner's lock or building.
+        if len(owner) < 2 or owner[1] != token:
+            sys.exit(0)
+        with open(lock, 'w') as f:  # adopt: alive PID is now ours
+            f.write('{} {}'.format(os.getpid(), token))
     try:
         if os.path.exists(target) and not (args.force or auto):
             sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
         block_bytes = args.block_mib << 20
         try:
-            stats = build_index_best(args.file, target, block_bytes)
-        except BaseException as error:
-            try:
-                if os.path.exists(target):
-                    os.unlink(target)  # never leave a partial sidecar behind
-            except OSError:
-                pass
-            if isinstance(error, (ValueError, _VCDResourceError, struct.error,
-                                  KeyError)):
-                sys.exit('Error: cannot index {}: {}'.format(args.file, error))
-            raise
+            stats = build_index_best(args.file, target, block_bytes,
+                                     threads=getattr(args, 'threads', None))
+        except (ValueError, _VCDResourceError, struct.error, KeyError) as error:
+            # Builders publish atomically and clean their OWN temp files;
+            # a failed rebuild must leave a pre-existing target untouched.
+            sys.exit('Error: cannot index {}: {}'.format(args.file, error))
         if args.output:
             _link_sidecar(sidecar, target)
     finally:
@@ -50,7 +67,8 @@ def cmd_index(vcd, args):
                             / max(1, stats.get('source_bytes', 1)), 4),
          'blocks': stats.get('blocks'),
          'raw_symbols': stats.get('raw_symbols'),
-         'signal_block_pairs': stats.get('signal_block_pairs')}
+         'signal_block_pairs': stats.get('signal_block_pairs'),
+         'threads': stats.get('threads', 1)}
     if args.json:
         if builder == 'python' and r['source_bytes'] >= 64 << 20:
             _warn('index built with the slower pure-Python mechanism '

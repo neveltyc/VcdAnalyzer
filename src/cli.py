@@ -52,6 +52,8 @@ def main():
                     help='rebuild even if the sidecar already exists')
     sp.add_argument('--output', metavar='PATH', default=None,
                     help='write the sidecar at PATH and link <file>.vcidx to it')
+    sp.add_argument('--threads', type=int, default=None, metavar='N',
+                    help='native builder threads, 1..16 (default min(4, cores))')
     sp.add_argument('--auto', action='store_true', help=argparse.SUPPRESS)
     _add_common(sp)
 

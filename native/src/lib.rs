@@ -671,6 +671,17 @@ pub fn build_from_manifest(
         .and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(64 << 20);
 
     let symtab = SymTab::new(&symbols);
+    // Soundness gate for parallel splitting (review F4): byte-level split
+    // anchors cannot know grammar context, so a '#T' inside a $comment body
+    // would be treated as a timestamp by the worker that starts there.
+    // Splitting is only sound when the data section contains NO section
+    // openers at all ('#' anchors are then timestamps or structural b/r/p
+    // operands, both handled). One cheap parallel byte scan decides.
+    let threads = if threads > 1 && section_openers_present(vcd_path, data_start, size0)? {
+        1
+    } else {
+        threads
+    };
     let mut splits: Vec<u64> = vec![data_start];
     if threads > 1 && size0.saturating_sub(data_start) >= parallel_min {
         for i in 1..threads {
@@ -803,37 +814,38 @@ pub fn build_from_manifest(
     // a half-written sidecar, and the fresh-claiming header is written first
     // — an interrupted in-place write would look valid forever.
     let tmp_path = format!("{}.tmp.{}", sidecar_path, std::process::id());
+    let threads_used = splits.len() - 1;
     let out = File::create(&tmp_path).map_err(|e| format!("create sidecar: {}", e))?;
     let mut w = BufWriter::with_capacity(1 << 20, out);
     let io = |e: std::io::Error| format!("write: {}", e);
     w.write_all(b"VCDIDX02").map_err(io)?;
-    put_u64(&mut w, size0);
-    put_u64(&mut w, mtime0);
-    put_u64(&mut w, block_bytes);
-    put_u64(&mut w, nblocks as u64);
-    put_u64(&mut w, symbols.len() as u64);
-    put_u64(&mut w, data_start);
+    put_u64(&mut w, size0)?;
+    put_u64(&mut w, mtime0)?;
+    put_u64(&mut w, block_bytes)?;
+    put_u64(&mut w, nblocks as u64)?;
+    put_u64(&mut w, symbols.len() as u64)?;
+    put_u64(&mut w, data_start)?;
     for &(s, e, t0, t1) in &blocks {
-        put_u64(&mut w, s);
-        put_u64(&mut w, e);
-        put_u64(&mut w, t0);
-        put_u64(&mut w, t1);
+        put_u64(&mut w, s)?;
+        put_u64(&mut w, e)?;
+        put_u64(&mut w, t0)?;
+        put_u64(&mut w, t1)?;
     }
     let mut location = directory_bytes;
     for p in &postings {
-        put_u64(&mut w, location);
-        put_u32(&mut w, p.len() as u32);
-        put_u32(&mut w, mode);
+        put_u64(&mut w, location)?;
+        put_u32(&mut w, p.len() as u32)?;
+        put_u32(&mut w, mode)?;
         location += p.len() as u64 * entry_bytes;
     }
     for p in &postings {
         for &(bid, rel) in p {
             if narrow {
-                put_u16(&mut w, bid as u16);
-                put_u32(&mut w, rel);
+                put_u16(&mut w, bid as u16)?;
+                put_u32(&mut w, rel)?;
             } else {
-                put_u32(&mut w, bid);
-                put_u32(&mut w, rel);
+                put_u32(&mut w, bid)?;
+                put_u32(&mut w, rel)?;
             }
         }
     }
@@ -843,15 +855,15 @@ pub fn build_from_manifest(
     let index_bytes = std::fs::metadata(sidecar_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(format!(
-        "{{\"build_s\":{:.4},\"source_bytes\":{},\"index_bytes\":{},\"blocks\":{},\"raw_symbols\":{},\"signal_block_pairs\":{},\"max_block_bytes\":{},\"posting_mode\":{}}}",
+        "{{\"build_s\":{:.4},\"source_bytes\":{},\"index_bytes\":{},\"blocks\":{},\"raw_symbols\":{},\"signal_block_pairs\":{},\"max_block_bytes\":{},\"posting_mode\":{},\"threads\":{}}}",
         started.elapsed().as_secs_f64(), size0, index_bytes, nblocks,
-        symbols.len(), pairs, max_block_bytes, mode
+        symbols.len(), pairs, max_block_bytes, mode, threads_used
     ))
 }
 
-fn put_u16(w: &mut BufWriter<File>, v: u16) { let _ = w.write_all(&v.to_le_bytes()); }
-fn put_u32(w: &mut BufWriter<File>, v: u32) { let _ = w.write_all(&v.to_le_bytes()); }
-fn put_u64(w: &mut BufWriter<File>, v: u64) { let _ = w.write_all(&v.to_le_bytes()); }
+fn put_u16(w: &mut BufWriter<File>, v: u16) -> Result<(), String> { w.write_all(&v.to_le_bytes()).map_err(|e| format!("write: {}", e)) }
+fn put_u32(w: &mut BufWriter<File>, v: u32) -> Result<(), String> { w.write_all(&v.to_le_bytes()).map_err(|e| format!("write: {}", e)) }
+fn put_u64(w: &mut BufWriter<File>, v: u64) -> Result<(), String> { w.write_all(&v.to_le_bytes()).map_err(|e| format!("write: {}", e)) }
 
 // -- C ABI for ctypes ------------------------------------------------------
 
@@ -983,4 +995,64 @@ fn find_timestamp_split(
 /// parse_int over a bare token (no leading '#' skip difference).
 fn parse_int_bytes(tok: &[u8]) -> Result<Option<u64>, String> {
     parse_int(tok)
+}
+
+/// True when the data section contains any '$X' token that is NOT a known
+/// marker ($end / $dump*) — i.e. a section opener exists somewhere, and
+/// byte-level split anchors can no longer be assumed top-level.
+fn section_openers_present(vcd_path: &str, start: u64, end: u64) -> Result<bool, String> {
+    let mut f = File::open(vcd_path).map_err(|e| format!("open: {}", e))?;
+    f.seek(SeekFrom::Start(start)).map_err(|e| format!("seek: {}", e))?;
+    let mut carry: Vec<u8> = Vec::new();
+    let mut pos = start;
+    let mut buf = vec![0u8; 1 << 22];
+    while pos < end {
+        let want = ((end - pos) as usize).min(buf.len());
+        let got = f.read(&mut buf[..want]).map_err(|e| format!("read: {}", e))?;
+        if got == 0 { break; }
+        let mut data = &buf[..got];
+        if !carry.is_empty() {
+            let mut joined = carry.clone();
+            joined.extend_from_slice(data);
+            // rescan the joined head once, then continue on the raw buffer
+            let cut = joined.len().saturating_sub(data.len());
+            let _ = cut;
+            if let Some(dollar) = scan_for_opener(&joined) {
+                return Ok(dollar);
+            }
+            carry.clear();
+            // skip the joined prefix we already validated (all but a tail
+            // that might end mid-token)
+            let skip = joined.len().saturating_sub(256);
+            data = &buf[skip.min(got)..got];
+            pos += skip as u64;
+        }
+        if let Some(dollar) = scan_for_opener(data) {
+            return Ok(dollar);
+        }
+        // keep a tail that may end mid-token for the next round
+        let tail = data.len().saturating_sub(256);
+        carry.extend_from_slice(&data[tail..]);
+        pos += (data.len() - tail) as u64;
+    }
+    if !carry.is_empty() {
+        if let Some(dollar) = scan_for_opener(&carry) {
+            return Ok(dollar);
+        }
+    }
+    Ok(false)
+}
+
+fn scan_for_opener(data: &[u8]) -> Option<bool> {
+    let mut i = 0usize;
+    while i < data.len() {
+        if is_ws(data[i]) { i += 1; continue; }
+        let s = i;
+        while i < data.len() && !is_ws(data[i]) { i += 1; }
+        let tok = &data[s..i];
+        if tok.first() == Some(&b'$') && !is_known_marker(tok) {
+            return Some(true);
+        }
+    }
+    None
 }

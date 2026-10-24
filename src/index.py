@@ -124,10 +124,10 @@ def items(parser, fd, start, end, initial_time=0, counters=None, chunk_size=1 <<
                     break
             continue
         if c0 == '#' and len(token) > 1 and token[1].isdigit():
-            # NOTE (known divergence): Python's int() accepts non-ASCII
-            # digits ('#٥' -> 5) while the native builder is ASCII-only;
-            # such adversarial tokens can therefore be indexed differently
-            # by the two builders. ASCII-digit files are unaffected.
+            # NOTE: Python's int() accepts non-ASCII digits ('#٥' -> 5).
+            # The native builder refuses such tokens entirely and defers
+            # to THIS builder, which shares the parser's exact semantics —
+            # so indexed behavior never diverges from the plain parser.
             value = _parse_vcd_timestamp_token(token)
             if value is None:
                 # Tolerated malformed timestamp (e.g. '#1.5'): the reference
@@ -748,7 +748,15 @@ def native_index_build(path, sidecar, block_bytes):
 
 def build_index_best(path, sidecar, block_bytes=8 << 20):
     """Native build when the running file carries one, pure Python else."""
-    stats = native_index_build(path, sidecar, block_bytes)
+    try:
+        stats = native_index_build(path, sidecar, block_bytes)
+    except ValueError as error:
+        # The native builder is ASCII-only and refuses some exotic tokens;
+        # and build-fatal conditions (non-monotonic timestamps) re-raise
+        # from the pure-Python pass below with the same user-facing error.
+        _warn('native builder deferred to pure Python: {}'.format(error),
+              cat='index_native_deferred')
+        stats = None
     if stats is not None:
         stats['builder'] = 'native'
         return stats

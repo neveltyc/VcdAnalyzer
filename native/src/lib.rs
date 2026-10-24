@@ -248,6 +248,17 @@ enum Class {
 
 fn classify(b: &[u8]) -> Result<Class, String> {
     let first = b[0];
+    // Python's int() and the _REAL_RE regex accept non-ASCII digits and
+    // whitespace; this builder is deliberately ASCII-only. Rather than
+    // silently disagreeing with the reference parser on such tokens, any
+    // grammar-position token ('#', b, r, p openers) carrying a non-ASCII
+    // byte aborts the build — the caller falls back to the pure-Python
+    // builder, which shares the parser's exact semantics.
+    if matches!(first, b'#' | b'b' | b'B' | b'r' | b'R' | b'p')
+        && b.iter().any(|&c| c >= 0x80)
+    {
+        die!("non-ASCII byte in a grammar token; use the pure-Python builder");
+    }
     if first == b'$' {
         return Ok(if is_known_marker(b) { Class::MarkerKnown } else { Class::SectionOpen });
     }

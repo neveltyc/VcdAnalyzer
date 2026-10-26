@@ -124,15 +124,25 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 - **Explicit or automatic.** `vcd_analyzer.py index sim.vcd` builds `sim.vcd.vcidx`
   (a fraction of a percent of the source; seconds for a 10 GB dump). Or do
-  nothing: the first query on a big unindexed dump starts a background build —
-  the next query is fast.
+  nothing: the first query on an unindexed dump of 100 MiB or more starts a
+  background build — the next query is fast. Smaller files are never touched
+  automatically (a plain scan answers them in seconds); `index` builds one
+  for any size on request.
 - **Queries use it automatically** whenever the sidecar is fresh; output is
   identical, only faster (minutes-long point lookups become sub-second).
-- **Freshness is `(size, mtime_ns)`** recorded in the sidecar header — O(1) per
-  query, no content hashing. A stale sidecar warns once and the plain parser
-  answers; an automatic rebuild is skipped (with a message) while the source
-  looks still-open-for-write (mtime < 5 s, an `lsof` holder, or a Windows
-  sharing violation).
+- **Freshness is `(size, mtime_ns)` plus a content fingerprint** — the
+  header records size and mtime, and a footer hashes eight 4 KiB samples
+  spread over the source (header and tail included), so a different dump
+  copied in with the same size and a preserved mtime (`cp -p`, `rsync -t`,
+  tar) is caught too. The check costs a few small reads per query whatever
+  the file size. A stale sidecar warns once and the plain parser answers;
+  an automatic rebuild is skipped (with a message) while the source looks
+  still-open-for-write (mtime < 5 s, an `lsof` holder, or a Windows sharing
+  violation). Sidecars written by 1.6.0 carry no fingerprint and are rebuilt.
+- **Files next to the dump.** Besides `<file>.vcidx`, a background build
+  keeps a few-byte `<file>.vcidx.lock` (its single-flight lock) and writes
+  `<file>.vcidx.log` only when it fails; a later successful build removes
+  the log.
 - On platforms without an embedded native builder, automatic builds are off
   by default (they would only run the much slower pure-Python pass) — the
   `index` command still works there and says which mechanism it used.
@@ -192,8 +202,12 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ## Single file, zero dependencies
 
-`vcd_analyzer.py` is pure Python with no third-party imports. No pip install, no virtualenv
-ritual &mdash; drop it anywhere with Python 3.8+ and it works.
+Both files are single files with no third-party Python dependencies. The full
+`vcd_analyzer.py` additionally embeds compressed native index-builder libraries,
+loaded through a C ABI and checksum-verified, and falls back to pure Python
+when none matches the platform; `vcd_analyzer_lite.py` is pure Python only.
+No pip install, no virtualenv ritual &mdash; drop it anywhere with Python 3.8+
+and it works.
 
 ## Project layout
 
@@ -206,7 +220,7 @@ native/               Rust index-builder crate + cross-build script (cargo-zigbu
 verify/               pytest + unittest test suite
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
-.github/workflows/    CI: both release files must match src/, tests on 3.8-3.13
+.github/workflows/    CI: release files match src/, native libraries match a fresh build, tests on 3.8-3.13
 CHANGELOG.md          Compact changelog with links to detailed release notes
 ```
 
@@ -231,11 +245,27 @@ differs: the lite build carries an explicit stub that errors clearly on
 anything index-related) and can never diverge silently — `_make.py --check`
 rejects a drifted release file, and CI enforces it.
 
+Without `native/dist/`, `_make.py` reuses the libraries already embedded in
+`vcd_analyzer.py`, so Python-only changes need no Rust toolchain. The native
+libraries are built reproducibly with a pinned toolchain (Rust 1.96.0 from
+`native/rust-toolchain.toml`, zig 0.16.0, cargo-zigbuild 0.24.0):
+
+```bash
+pip install ziglang==0.16.0 cargo-zigbuild==0.24.0
+sh native/build_all.sh                        # -> native/dist/
+python _make.py                               # embed them
+python _make.py --check-native native/dist    # embedded == this build?
+```
+
+CI's `native` job runs the same build on every push and fails when the
+embedded libraries differ from it; its `native-dist` artifact is the
+canonical build to embed after changing `native/`.
+
 ## Tests
 
 ```bash
-# Full pytest suite (requires pytest)
-python -m pytest verify/ -v
+# Full pytest suite (requires pytest; pytest-xdist's -n auto runs it in parallel)
+python -m pytest verify/ -q -n auto
 
 # unittest only (stdlib, no extra installs)
 python -m unittest discover -s verify -p "test_cli.py"

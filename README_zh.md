@@ -120,14 +120,22 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 - **显式或自动。** `vcd_analyzer.py index sim.vcd` 生成 `sim.vcd.vcidx`
   （约为源文件的百分之一都不到；10GB 级 dump 只需几秒）。也可以什么都不做：
-  对未索引的大文件的第一次查询会自动在后台构建，下一次查询就快了。
+  对 100 MiB 及以上、尚未索引的文件，第一次查询会自动在后台构建，下一次查询
+  就快了。更小的文件不会被自动处理（纯扫描几秒内就能回答）；需要时可用
+  `index` 对任意大小的文件显式构建。
   `--output PATH` 可存到别处（PATH 必须以 `.vcidx` 结尾）并软链接回
   `<file>.vcidx`；绝不删除已存在的普通文件，链接/构建失败只报告不致命。
 - **查询自动使用**新鲜的索引；输出完全一致，只是更快（分钟级点查询变亚秒级）。
-- **新鲜度以 `(文件大小, 纳秒级 mtime)` 判定**，记录在索引头部——每条查询
-  O(1)，不做内容哈希。索引陈旧时警告一次并由纯解析器回答；源文件疑似仍在
-  被写入时（mtime < 5 秒、lsof 显示被持有、Windows 共享冲突）自动重建被
-  跳过并给出提示。
+- **新鲜度 = `(文件大小, 纳秒级 mtime)` + 内容指纹**：头部记录大小与 mtime，
+  尾部对源文件均匀分布的 8 个 4 KiB 采样（含文件头与文件尾）做哈希，因此
+  大小相同、mtime 被保留的另一份 dump（`cp -p`、`rsync -t`、tar 解包）也能
+  识别。每条查询只多几次小读取，与文件大小无关。索引陈旧时警告一次并由纯
+  解析器回答；源文件疑似仍在被写入时（mtime < 5 秒、lsof 显示被持有、
+  Windows 共享冲突）自动重建被跳过并给出提示。1.6.0 生成的索引没有指纹，
+  会被视为陈旧并重建。
+- **dump 旁边的文件。** 除 `<file>.vcidx` 外，后台构建会保留一个几字节的
+  `<file>.vcidx.lock`（单例锁）；只有构建失败时才写 `<file>.vcidx.log`，
+  之后构建成功会将其删除。
 - 无内嵌原生库的平台上，后台自动构建默认关闭（只会跑慢得多的纯
   Python 路径）——`index` 命令仍可用，并会说明所用机制。
 - 环境变量：`VCD_ANALYZER_AUTO_INDEX=0` 关闭后台构建，
@@ -187,7 +195,7 @@ native/               Rust 索引构建器 crate + 交叉编译脚本
 verify/               pytest + unittest 测试套件
 verify/fixtures/      脱敏 VCD 测试波形（不含任何私有路径）
 verify/samples/       真实 GitHub VCD 样本，用于冒烟测试
-.github/workflows/    CI：两个发行文件必须与 src/ 一致，3.8-3.13 测试
+.github/workflows/    CI：发行文件与 src/ 一致、原生库与重新构建结果一致、3.8-3.13 测试
 CHANGELOG.md          简洁变更日志，含详细发行说明链接
 ```
 
@@ -205,11 +213,25 @@ CI 会拒绝发行文件与 `src/` 不一致的提交，并在每次 push 时跑
 （Linux/macOS/Windows，Python 3.8-3.13）；本地先跑测试是可选的。
 只有 `_preamble.py` 可以包含模块级 import——各部分共享同一个命名空间。
 
+没有 `native/dist/` 时，`_make.py` 会复用 `vcd_analyzer.py` 中已内嵌的库，
+因此只改 Python 不需要 Rust 工具链。原生库用锁定的工具链可复现地构建
+（Rust 1.96.0 见 `native/rust-toolchain.toml`，zig 0.16.0，cargo-zigbuild 0.24.0）：
+
+```bash
+pip install ziglang==0.16.0 cargo-zigbuild==0.24.0
+sh native/build_all.sh                        # -> native/dist/
+python _make.py                               # 嵌入
+python _make.py --check-native native/dist    # 内嵌库是否等于本次构建？
+```
+
+CI 的 `native` 任务每次 push 都做同样的构建，内嵌库与之不一致即失败；
+修改 `native/` 后，以它上传的 `native-dist` 产物为准嵌入。
+
 ## 测试
 
 ```bash
-# 完整 pytest 套件（需安装 pytest）
-python -m pytest verify/ -v
+# 完整 pytest 套件（需安装 pytest；pytest-xdist 的 -n auto 可并行）
+python -m pytest verify/ -q -n auto
 
 # 仅 unittest（标准库，无需额外安装）
 python -m unittest discover -s verify -p "test_cli.py"

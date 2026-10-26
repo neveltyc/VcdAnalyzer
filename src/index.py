@@ -12,16 +12,6 @@
 # Python build pass below; queries are identical either way. Disable with
 # VCD_ANALYZER_NO_INDEX=1 (never use).
 
-BLOCK = struct.Struct('<QQqq')
-DIRECTORY = struct.Struct('<QII')
-POSTING = struct.Struct('<II')
-MAGIC = b'VCDIDX01'
-MAGIC2 = b'VCDIDX02'   # same layout; postings may use the compact modes below
-# Posting entry encodings by directory mode. fmt reads ONE entry; size is the
-# stride; runs marks block-RANGE pairs (no record pointers) vs point pairs.
-# Modes 0/1 are the original 8-byte encodings (VCDIDX01, Python builder);
-# 2/3 are the compact 6/4-byte forms written by the Rust builder when the
-
 HEADER = struct.Struct('<8sQQQQQQ')
 BLOCK = struct.Struct('<QQqq')
 DIRECTORY = struct.Struct('<QII')
@@ -39,6 +29,19 @@ ENTRY = {
     2: (struct.Struct('<HI'), 6, False),
     3: (struct.Struct('<HH'), 4, True),
 }
+# Content-fingerprint footer, appended after the postings by both builders.
+# The header's (size, mtime_ns) catches every ordinary rewrite in O(1); the
+# footer also catches a DIFFERENT dump that arrives with the same size and a
+# preserved mtime (cp -p, rsync -t, tar/zip extraction). It hashes a fixed
+# number of small samples spread evenly over the source — the header region
+# ($date/$version) and the tail included — so verifying it costs the same few
+# positioned reads whatever the file size. A sidecar without the footer
+# (written by 1.6.0) counts as stale and is rebuilt.
+FOOTER = struct.Struct('<8sII16s')
+FOOTER_MAGIC = b'VCDFPR01'
+FINGERPRINT_SAMPLES = 8
+FINGERPRINT_SAMPLE_BYTES = 4096
+
 
 class _CorruptSidecarError(RuntimeError):
     """The sidecar failed an on-demand integrity check (e.g. a posting
@@ -54,6 +57,66 @@ def _pread(fd, size, offset):
         return os.pread(fd, size, offset)
     os.lseek(fd, offset, os.SEEK_SET)
     return os.read(fd, size)
+
+
+def _source_fingerprint(fd, size, samples=FINGERPRINT_SAMPLES,
+                        sample_bytes=FINGERPRINT_SAMPLE_BYTES):
+    digest = hashlib.blake2b(struct.pack('<QII', size, samples, sample_bytes),
+                             digest_size=16)
+    if size <= samples * sample_bytes:
+        offsets = range(0, size, sample_bytes)  # small file: all of it
+    else:
+        span = size - sample_bytes
+        offsets = [span * k // (samples - 1) for k in range(samples)]
+    for offset in offsets:
+        digest.update(_pread(fd, sample_bytes, offset))
+    return digest.digest()
+
+
+def _footer_mismatch(footer, fd, size):
+    """Why the footer bytes do not vouch for the source behind fd, or None."""
+    if len(footer) != FOOTER.size:
+        return 'truncated index'
+    magic, samples, sample_bytes, digest = FOOTER.unpack(footer)
+    if magic != FOOTER_MAGIC:
+        return 'no content fingerprint (built by an older version); rebuild it'
+    if not (2 <= samples <= 64 and 1 <= sample_bytes <= 1 << 20):
+        return 'corrupt content fingerprint'
+    if _source_fingerprint(fd, size, samples, sample_bytes) != digest:
+        return 'stale index (source content changed)'
+    return None
+
+
+def _seal_sidecar(path, built, sidecar):
+    """Append the fingerprint footer to a freshly built sidecar and publish
+    it atomically at `sidecar` (the builders write to `built`). The source
+    must still match the size/mtime the builder recorded, so the footer can
+    only ever describe the bytes the index was built from."""
+    published = False
+    try:
+        with open(built, 'rb') as f:
+            head = f.read(24)
+        _magic, size, mtime = struct.unpack_from('<8sQQ', head, 0)
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+        try:
+            stat = os.fstat(fd)
+            if (stat.st_size, stat.st_mtime_ns) != (size, mtime):
+                raise ValueError('source changed while building index')
+            footer = FOOTER.pack(FOOTER_MAGIC, FINGERPRINT_SAMPLES,
+                                 FINGERPRINT_SAMPLE_BYTES,
+                                 _source_fingerprint(fd, size))
+        finally:
+            os.close(fd)
+        with open(built, 'ab') as f:
+            f.write(footer)
+        os.replace(built, sidecar)
+        published = True
+    finally:
+        if not published:
+            try:
+                os.unlink(built)
+            except OSError:
+                pass
 
 
 class PositionedToken(str):
@@ -83,7 +146,8 @@ def tokens(fd, start, end, counters=None, chunk_size=1 << 20):
         for match in re.finditer(rb'\S+', data[:cut]):
             token = match.group().decode('utf-8', 'replace')
             if len(token.split()) != 1:
-                raise ValueError('prototype does not support non-ASCII whitespace')
+                raise ValueError('non-ASCII whitespace inside a token is not supported '
+                                 'by the index builder')
             if len(token) > MAX_DATA_TOKEN_LEN:
                 raise _VCDResourceError('VCD token too long')
             yield PositionedToken(token, base + match.start())
@@ -148,7 +212,7 @@ def items(parser, fd, start, end, initial_time=0, counters=None, chunk_size=1 <<
             if value is None:
                 # Tolerated malformed timestamp (e.g. '#1.5'): the reference
                 # parser skips it entirely, so it must not act as a commit
-                # point for pending bus writes either (review P1-2).
+                # point for pending bus writes either.
                 yield token.offset, before, 'marker', current, None, None
                 continue
             if value < current:
@@ -306,7 +370,7 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
                 if modes[sid] else len(values) for sid,values in enumerate(memberships))
     posting_start = HEADER.size + BLOCK.size * len(blocks) + DIRECTORY.size * len(symbols)
     # Atomic publication: concurrent readers must never see a half-written
-    # sidecar whose fresh-claiming header already matches (review P0-2).
+    # sidecar whose fresh-claiming header already matches.
     sidecar_tmp = str(sidecar) + '.tmp.{}'.format(os.getpid())
     out = open(sidecar_tmp, 'wb')
     _published = False
@@ -329,11 +393,11 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
                     out.write(buf); buf.clear()
             out.write(buf)
         out.close()
-        os.replace(sidecar_tmp, sidecar)
+        _seal_sidecar(path, sidecar_tmp, sidecar)
         _published = True
     finally:
         if not _published:
-            # Builder-owned cleanup (review finding C): a failed build —
+            # Builder-owned cleanup: a failed build —
             # write error, publish error, anything — removes its OWN temp
             # file; the published sidecar (if any) was never touched by
             # this pass.
@@ -383,7 +447,7 @@ class IndexedVCD(VCDParser):
         self._enforce_gate = enforce_gate
         # Freshness first, handles second: a stale sidecar must not leak the
         # source fd (a leaked fd makes lsof report OURSELVES as the writer,
-        # permanently blocking auto-rebuild — review P1-1).
+        # permanently blocking auto-rebuild).
         _st = os.stat(path)
         with open(sidecar, 'rb') as _probe:
             _head = _probe.read(24)
@@ -404,6 +468,12 @@ class IndexedVCD(VCDParser):
             if (magic not in (MAGIC, MAGIC2) or size != stat.st_size
                     or mtime != stat.st_mtime_ns):
                 raise ValueError('stale index')
+            body_end = len(self.mapping) - FOOTER.size
+            if body_end < HEADER.size:
+                raise ValueError('truncated index')
+            reason = _footer_mismatch(self.mapping[body_end:], self.fd, size)
+            if reason:
+                raise ValueError(reason)
             self.file_size = size
             self.symbols = raw_symbols(self)
             if ns != len(self.symbols):
@@ -413,7 +483,7 @@ class IndexedVCD(VCDParser):
             # a damaged directory (bad mode byte, postings past EOF,
             # non-monotonic block ends) must fall back to the plain parser
             # here, never surface as KeyError/struct.error mid-query.
-            if nb * BLOCK.size + HEADER.size > len(self.mapping):
+            if nb * BLOCK.size + HEADER.size > body_end:
                 raise ValueError('truncated block table')
             self.blocks = [BLOCK.unpack_from(
                 self.mapping, HEADER.size + k * BLOCK.size) for k in range(nb)]
@@ -431,7 +501,7 @@ class IndexedVCD(VCDParser):
                 for gid, _bit in refs:
                     self.sources.setdefault(gid, set()).add(sym)
             blob_start = directory_start + ns * DIRECTORY.size
-            if blob_start > len(self.mapping):
+            if blob_start > body_end:
                 raise ValueError('truncated directory')
             for k in range(ns):
                 location, count, flags = DIRECTORY.unpack_from(
@@ -439,7 +509,7 @@ class IndexedVCD(VCDParser):
                 if flags not in ENTRY:
                     raise ValueError('corrupt posting mode')
                 _fmt, esize, _runs = ENTRY[flags]
-                if location < blob_start or location + count * esize > len(self.mapping):
+                if location < blob_start or location + count * esize > body_end:
                     raise ValueError('posting range out of bounds')
         except Exception:
             self.close()
@@ -461,7 +531,7 @@ class IndexedVCD(VCDParser):
     def index_advisable(self):
         """Per-file usage gate; False means 'a plain source scan wins'.
 
-        Two load-time facts decide the regime (PLAN.md §4.1), both O(1):
+        Two load-time facts decide the regime, both O(1):
           data_bytes = file size - data-section start
           bytes of data per raw symbol = data_bytes / raw symbol count
         Header-heavy dumps (formal traces, post-processed collapses) declare
@@ -830,7 +900,19 @@ def native_index_build(path, sidecar, block_bytes):
     build = globals().get('_NATIVE_INDEX_BUILD')
     if build is None:
         return None
-    return build(path, sidecar, block_bytes)
+    built = '{}.native.{}'.format(sidecar, os.getpid())
+    try:
+        stats = build(path, built, block_bytes)
+        if stats is None:
+            return None
+        _seal_sidecar(path, built, sidecar)
+    finally:
+        try:
+            os.unlink(built)  # left only when the build or the seal failed
+        except OSError:
+            pass
+    stats['index_bytes'] = os.path.getsize(sidecar)
+    return stats
 
 
 def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
@@ -880,7 +962,7 @@ def try_index(vcd_path):
     try:
         idx = IndexedVCD(vcd_path, sidecar)
     except (ValueError, OSError, struct.error, KeyError) as error:
-        # struct.error/KeyError: truncated or corrupt sidecar (review P0-2)
+        # struct.error/KeyError: truncated or corrupt sidecar
         _warn('ignoring {} ({})'.format(sidecar, error), cat='index_stale')
         return None
     if not idx.index_advisable():
@@ -893,18 +975,36 @@ def try_index(vcd_path):
 
 _AUTO_SCRIPT_PATH = None  # set by main(): the running single-file script
 
+# Smallest source a query builds an index for in the background. Below it a
+# plain scan answers in a few seconds and an index saves little (an indexed
+# point query still parses up to one 8 MiB block), so files that small are
+# left untouched; `index` still builds one on request at any size.
+_AUTO_INDEX_MIN_BYTES = 100 << 20
+
 
 def _sidecar_fresh(vcd_path, sidecar):
-    """True when the sidecar header still matches the source file."""
+    """True when the sidecar header and fingerprint footer still match the
+    source file (the same checks IndexedVCD applies before use)."""
     try:
         with open(sidecar, 'rb') as f:
             head = f.read(24)
-        if len(head) < 24:
-            return False
+            if len(head) < 24:
+                return False
+            f.seek(0, os.SEEK_END)
+            if f.tell() < HEADER.size + FOOTER.size:
+                return False
+            f.seek(-FOOTER.size, os.SEEK_END)
+            footer = f.read(FOOTER.size)
         magic, size, mtime = struct.unpack_from('<8sQQ', head, 0)
-        stat = os.stat(vcd_path)
-        return (magic in (MAGIC, MAGIC2)
-                and size == stat.st_size and mtime == stat.st_mtime_ns)
+        fd = os.open(vcd_path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+        try:
+            stat = os.fstat(fd)
+            if not (magic in (MAGIC, MAGIC2) and size == stat.st_size
+                    and mtime == stat.st_mtime_ns):
+                return False
+            return _footer_mismatch(footer, fd, size) is None
+        finally:
+            os.close(fd)
     except (OSError, struct.error):
         return False
 
@@ -986,11 +1086,13 @@ def _acquire_build_lock(sidecar):
 
 def _build_in_progress(sidecar):
     """True when a builder currently holds the lock (probe with an
-    immediately-released fd; an unopenable lock counts as busy)."""
+    immediately-released fd; an unopenable lock counts as busy). The probe
+    never creates the lock file: no lock file means no builder."""
     lock = sidecar + '.lock'
     try:
-        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, 'O_BINARY', 0),
-                     0o600)
+        fd = os.open(lock, os.O_RDWR | getattr(os, 'O_BINARY', 0))
+    except FileNotFoundError:
+        return False
     except OSError:
         return True
     try:
@@ -1011,24 +1113,29 @@ def maybe_auto_build(parser, vcd_path):
     that looks still-open-for-write (fresh mtime / lsof holder / Windows
     lock) is reported and left alone. Never blocks or fails the query.
 
-    Checks are ordered cheapest-first (review round 4): a fresh sidecar
-    needs nothing, a file below the gate floor can never pass (data <=
-    file size, so size pre-filters without the data_start header rescan),
-    a running builder or a live writer needs no native library — the
+    Checks are ordered cheapest-first: a query already served by the index
+    needs nothing, a file below _AUTO_INDEX_MIN_BYTES is never built
+    automatically (one stat), a fresh sidecar needs nothing, a running
+    builder or a live writer needs no native library — the
     base85+lzma+dlopen load happens only right before the spawn.
+
+    The builder runs detached with no terminal; it writes <sidecar>.log
+    only when the build fails (see cmd_index --auto).
     """
+    if isinstance(parser, IndexedVCD):
+        return  # the sidecar was fresh and is in use
     if os.environ.get('VCD_ANALYZER_AUTO_INDEX', '1').lower() in ('0', 'false', 'no'):
         return
     if _AUTO_SCRIPT_PATH is None:
         return  # imported as a library: no script to respawn
     vcd_path = os.path.abspath(vcd_path)
+    try:
+        if os.path.getsize(vcd_path) < _AUTO_INDEX_MIN_BYTES:
+            return
+    except OSError:
+        return
     sidecar = sidecar_path(vcd_path)
     if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
-        return
-    try:
-        if os.path.getsize(vcd_path) < 128 << 10:
-            return  # data <= size: below the gate floor, no header rescan
-    except OSError:
         return
     if _build_in_progress(sidecar):
         return  # a builder is already running for this file
@@ -1056,26 +1163,148 @@ def maybe_auto_build(parser, vcd_path):
               'native builder); run the index command to build with the '
               'slower pure-Python mechanism', cat='index_auto_no_native')
         return
-    log = None
     try:
-        try:
-            log = open(sidecar + '.log', 'a')
-        except OSError:
-            log = None
         subprocess.Popen(
             [sys.executable, _AUTO_SCRIPT_PATH, 'index', vcd_path, '--auto'],
-            stdout=log if log is not None else subprocess.DEVNULL,
-            stderr=subprocess.STDOUT if log is not None else subprocess.DEVNULL,
-            start_new_session=True, close_fds=True)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
         _warn('{}: building index in the background '
               '(VCD_ANALYZER_AUTO_INDEX=0 disables)'.format(vcd_path),
               cat='index_autobuild:' + vcd_path)
     except OSError as error:
         _warn('{}: background index build failed to start: {}'.format(
             vcd_path, error), cat='index_autobuild')
+
+
+# Pure-Python builds of sources at least this big carry a note that a
+# native builder would have been much faster.
+_SLOW_BUILD_NOTE_BYTES = 64 << 20
+
+
+def _build_index_command(vcd, args):
+    """Build the optional .vcidx sidecar for fast random access.
+
+    Explicit by design for interactive use: queries never write (the
+    background auto-builder is the one exception, gated by its own lock).
+    --output stores the sidecar at PATH and links <file>.vcidx to it so
+    queries still find it; a failed link is reported, never fatal. The
+    full variant builds via its embedded native library when one serves
+    the platform, else the pure-Python pass (identical sidecar semantics).
+    """
+    sidecar = sidecar_path(args.file)
+    target = os.path.abspath(args.output) if args.output else sidecar
+    if args.output:
+        # Sidecars are always named *.vcidx — an arbitrary extension would
+        # leave unrecognizable binary files on disk and invite confusion
+        # with the waveform itself.
+        if not target.endswith('.vcidx'):
+            sys.exit('Error: --output must end with .vcidx '
+                     '(e.g. --output {}{})'.format(target, '.vcidx'))
+        # --output pointing at the input VCD would REPLACE the waveform
+        # with the sidecar at publication; --force must not bypass this.
+        same = (os.path.realpath(target) == os.path.realpath(args.file)
+                or (os.path.exists(target)
+                    and os.path.exists(args.file)
+                    and os.path.samefile(target, args.file)))
+        if same:
+            sys.exit('Error: --output must not be the VCD file itself')
+    auto = bool(getattr(args, 'auto', False))
+    lock_fd = None
+    if auto:
+        # The background builder holds the OS lock for its own lifetime.
+        # A lost race (another builder grabbed it) exits quietly.
+        lock_fd = _acquire_build_lock(sidecar)
+        if lock_fd is None:
+            sys.exit(0)
+    try:
+        if os.path.exists(target) and not (args.force or auto):
+            sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
+        block_bytes = args.block_mib << 20
+        try:
+            stats = build_index_best(args.file, target, block_bytes,
+                                     threads=getattr(args, 'threads', None))
+        except (ValueError, _VCDResourceError, struct.error, KeyError) as error:
+            # Builders publish atomically and clean their OWN temp files;
+            # a failed rebuild must leave a pre-existing target untouched.
+            sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+        if args.output:
+            _link_sidecar(sidecar, target)
     finally:
-        if log is not None:
-            log.close()
+        if lock_fd is not None:
+            os.close(lock_fd)  # releases the OS lock; the file is kept
+    builder = stats.get('builder', 'python')
+    r = {'file': args.file, 'sidecar': sidecar,
+         'builder': builder,
+         'build_s': round(stats.get('build_s', 0.0), 3),
+         'source_bytes': stats.get('source_bytes'),
+         'index_bytes': stats.get('index_bytes'),
+         'index_pct': round(100.0 * stats.get('index_bytes', 0)
+                            / max(1, stats.get('source_bytes', 1)), 4),
+         'blocks': stats.get('blocks'),
+         'raw_symbols': stats.get('raw_symbols'),
+         'signal_block_pairs': stats.get('signal_block_pairs'),
+         'threads': stats.get('threads', 1),
+         'parallel_fallback': stats.get('parallel_fallback', False)}
+    if args.json:
+        if builder == 'python' and r['source_bytes'] >= _SLOW_BUILD_NOTE_BYTES:
+            _warn('index built with the slower pure-Python mechanism '
+                  '(no native builder for this platform)', cat='index_slow_build')
+        _json(r)
+        return
+    print('Built    : {}'.format(target))
+    print('Builder  : {}'.format(builder))
+    print('Source   : {:,} bytes'.format(r['source_bytes']))
+    print('Index    : {:,} bytes ({:.4f}%)'.format(r['index_bytes'], r['index_pct']))
+    print('Blocks   : {} x {} MiB'.format(r['blocks'], args.block_mib))
+    print('Symbols  : {} raw, {:,} signal-block pairs'.format(
+        r['raw_symbols'], r['signal_block_pairs']))
+    print('Time     : {:.3f}s'.format(r['build_s']))
+    if builder == 'python' and r['source_bytes'] >= _SLOW_BUILD_NOTE_BYTES:
+        # Full variant, no library for this platform: say so when the file
+        # is big enough for the difference to matter.
+        print('Note     : no native builder for this platform — building with '
+              'the pure-Python index mechanism (much slower). Supported '
+              'platforms build natively with up to 4 threads.')
+    print('Use      : queries pick this up automatically; VCD_ANALYZER_NO_INDEX=1 disables')
+
+def cmd_index(vcd, args):
+    """The `index` command. A background build (--auto, spawned by
+    maybe_auto_build with no terminal attached) keeps its diagnostics in
+    memory and leaves <sidecar>.log behind only when the build fails; a
+    successful build removes the log of an earlier failure."""
+    if not getattr(args, 'auto', False):
+        return _build_index_command(vcd, args)
+    import io
+    import traceback
+    log_path = sidecar_path(args.file) + '.log'
+    captured = io.StringIO()
+    stderr = sys.stderr
+    sys.stderr = captured
+    failure = None
+    try:
+        _build_index_command(vcd, args)
+    except SystemExit as stop:
+        if stop.code not in (None, 0):
+            failure = stop.code if isinstance(stop.code, str) \
+                else 'exit status {}'.format(stop.code)
+    except BaseException:
+        failure = traceback.format_exc()
+    finally:
+        sys.stderr = stderr
+    if failure is None:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
+        return
+    try:
+        with open(log_path, 'w', encoding='utf-8') as log:
+            log.write('{} background index build of {} failed\n{}{}\n'.format(
+                time.strftime('%Y-%m-%d %H:%M:%S'), args.file,
+                captured.getvalue(), str(failure).rstrip()))
+    except OSError:
+        pass
+    sys.exit(1)
 
 
 def _link_sidecar(sidecar, target):

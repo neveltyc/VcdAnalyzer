@@ -3,3 +3,10 @@
 # macOS, where it would strip exported symbols too.
 [target.x86_64-pc-windows-gnu]
 rustflags = ["-C", "link-arg=-Wl,-s"]
+
+# macOS: a fixed install name instead of the absolute build path the linker
+# records by default — the library is loaded by path through ctypes, and a
+# machine-specific path would both leak into the release file and make the
+# build depend on where the checkout lives.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-install_name,@rpath/libvcdidx.dylib"]

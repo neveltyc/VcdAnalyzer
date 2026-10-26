@@ -1,5 +1,5 @@
-// Thin CLI wrapper over the vcdidx library core. Same behavior as the
-// research-era standalone builder: manifest on stdin, stats JSON on
+// Thin CLI wrapper over the vcdidx library core (for debugging the
+// builder outside Python): manifest on stdin, stats JSON on
 // stdout, errors on stderr with exit code 2.
 
 use std::io::Read;

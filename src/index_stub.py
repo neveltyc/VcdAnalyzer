@@ -33,13 +33,11 @@ def try_index(vcd_path):
 
 
 def maybe_auto_build(parser, vcd_path):
-    """Never builds in the standard variant (notice came from try_index)."""
+    """Never builds in the lite build."""
     return None
 
 
-def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
-    sys.exit('Error: ' + _FAST_ONLY)
-
-
 def cmd_index(vcd, args):
+    """Every `index` invocation — explicit, --force, --output or the hidden
+    --auto — gets the same pointer to the full build."""
     sys.exit('Error: ' + _FAST_ONLY)

@@ -43,6 +43,8 @@ def test_output_with_symlink(tmp_path):
     assert snap.returncode == 0, snap.stderr
 
 
+@pytest.mark.skipif(hasattr(os, 'geteuid') and os.geteuid() == 0,
+                    reason='root ignores the read-only directory permission')
 def test_output_link_failure_warns(tmp_path):
     # A read-only vcd directory makes the symlink fail for real; the build
     # itself still succeeds at --output and the failure is reported.
@@ -62,11 +64,24 @@ def test_output_link_failure_warns(tmp_path):
         os.chmod(vcd_dir, 0o700)
 
 
+def _run_cli_any_size(args):
+    """Run the CLI with the automatic-build size floor lifted, so the small
+    synthetic files here exercise the same path a 100 MiB dump takes."""
+    import subprocess
+    from conftest import SCRIPT
+    code = ('import sys; sys.argv = sys.argv[1:]; sys.path.insert(0, {!r}); '
+            'import vcd_analyzer as va; va._AUTO_INDEX_MIN_BYTES = 0; va.main()'
+            ).format(str(SCRIPT.parent))
+    return subprocess.run([sys.executable, '-S', '-c', code, str(SCRIPT)]
+                          + list(map(str, args)), text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+
+
 def test_auto_build_spawn(tmp_path):
     _clear_autobuild_state()
     src = _big_vcd(tmp_path)
     _settled(src)
-    snap = _run_cli(['--json', 'snapshot', str(src), '--at', '1'])
+    snap = _run_cli_any_size(['--json', 'snapshot', str(src), '--at', '1'])
     assert snap.returncode == 0, snap.stderr
     assert 'building index in the background' in snap.stderr
     sidecar = Path(va.sidecar_path(src))
@@ -84,6 +99,39 @@ def test_auto_build_spawn(tmp_path):
         time.sleep(0.1)
     assert fd is not None, 'builder never released the lock'
     os.close(fd)
+    # a successful background build leaves no log behind
+    assert not os.path.exists(str(sidecar) + '.log')
+
+
+def test_auto_build_below_floor_leaves_no_files(tmp_path):
+    """A gate-passing file below _AUTO_INDEX_MIN_BYTES is answered by the
+    plain parser and nothing is written next to it — not even a lock."""
+    _clear_autobuild_state()
+    src = _big_vcd(tmp_path)
+    _settled(src)
+    assert os.path.getsize(src) < va._AUTO_INDEX_MIN_BYTES
+    snap = _run_cli(['--json', 'snapshot', str(src), '--at', '1'])
+    assert snap.returncode == 0, snap.stderr
+    assert 'background' not in snap.stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == [src.name]
+
+
+def test_background_build_log_only_on_failure(tmp_path, monkeypatch):
+    """`index --auto` (the detached builder) writes <sidecar>.log only when
+    it fails, and a later successful build removes it."""
+    src = _big_vcd(tmp_path)
+    _settled(src)
+    log = Path(va.sidecar_path(src) + '.log')
+    monkeypatch.setenv('VCD_ANALYZER_FAIL_INDEX', '1')
+    failed = _run_cli(['index', str(src), '--auto'])
+    assert failed.returncode == 1
+    assert failed.stderr == ''  # detached: diagnostics go to the log
+    assert 'simulated index failure' in log.read_text(encoding='utf-8')
+    monkeypatch.delenv('VCD_ANALYZER_FAIL_INDEX')
+    built = _run_cli(['index', str(src), '--auto'])
+    assert built.returncode == 0, built.stderr
+    assert va._sidecar_fresh(src, va.sidecar_path(src))
+    assert not log.exists()
 
 
 def test_auto_build_kill_switch(tmp_path, monkeypatch):
@@ -101,7 +149,7 @@ def test_auto_build_skipped_for_live_writer(tmp_path):
     va.build_index(src, va.sidecar_path(src), 64)
     # bump the source mtime to NOW: looks like a simulator still writing
     os.utime(src)
-    snap = _run_cli(['--json', 'snapshot', str(src), '--at', '1'])
+    snap = _run_cli_any_size(['--json', 'snapshot', str(src), '--at', '1'])
     assert snap.returncode == 0, snap.stderr
     assert 'still being written' in snap.stderr or 'not rebuilt' in snap.stderr
     # and no rebuild happened: the stale sidecar is untouched
@@ -150,9 +198,9 @@ def _run_cli(args, env_extra=None):
 
 
 def test_small_file_never_loads_native_library(tmp_path, monkeypatch):
-    """Order regression (round-4/5 review): a sub-gate file with no sidecar
-    must be rejected by the size pre-filter BEFORE the native library
-    load — small-file queries never pay lzma+dlopen."""
+    """Order regression: a file below the size floor with no sidecar must
+    be rejected by the size pre-filter BEFORE the native library load —
+    small-file queries never pay lzma+dlopen."""
     monkeypatch.setattr(va, '_AUTO_SCRIPT_PATH', str(Path(__file__).resolve().parents[1] / 'vcd_analyzer.py'))
     small = tmp_path / 'tiny.vcd'
     small.write_text('$timescale 1ns $end $scope module top $end $var wire 1 ! a $end '
@@ -174,6 +222,7 @@ def test_gate_file_loads_native_last(tmp_path, monkeypatch):
     checks) — the reorder must not have disabled auto-build entirely."""
     from test_index import _big_vcd
     monkeypatch.setattr(va, '_AUTO_SCRIPT_PATH', str(Path(__file__).resolve().parents[1] / 'vcd_analyzer.py'))
+    monkeypatch.setattr(va, '_AUTO_INDEX_MIN_BYTES', 0)
     src = _big_vcd(tmp_path)
     old = time.time() - 3600
     os.utime(src, (old, old))

@@ -1,0 +1,12 @@
+# Pinned so every machine — CI and local — builds byte-identical libraries:
+# the CI `native` job rebuilds native/dist/ and fails when the libraries
+# embedded in vcd_analyzer.py differ from that build.
+[toolchain]
+channel = "1.96.0"
+profile = "minimal"
+targets = [
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+    "aarch64-apple-darwin",
+]

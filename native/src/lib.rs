@@ -1,7 +1,7 @@
 // Fast block-index builder for vcd_analyzer — library form.
 //
-// Same grammar and sidecar format as the research prototype this was carved
-// from (research/vcdidx.rs on the research/vcd-index branch): see the PARITY
+// Same grammar and sidecar format as the pure-Python builder in
+// src/index.py (vcd_analyzer's Part 4): see the PARITY
 // comment below. This crate adds the deployment surface:
 //
 //   * build_from_manifest() — callable core returning Result (a library must
@@ -259,7 +259,7 @@ fn classify(b: &[u8]) -> Result<Class, String> {
     // a non-ASCII byte there takes the IDENTICAL invalid-4-state drop path
     // in both implementations (is_4state_bits vs _DEL_4STATE_CI), so there
     // is no divergence to refuse; scanning them cost ~0.6 s on a 10 GiB
-    // bus-heavy dump (review round 3, perf follow-up). Scalar and p tokens
+    // bus-heavy dump. Scalar and p tokens
     // are likewise parity-safe without a scan (byte-exact identifier
     // lookup; fixed ASCII state/level sets on both sides).
     if matches!(first, b'#' | b'r' | b'R')
@@ -470,7 +470,7 @@ impl Builder {
 
     /// Drain a '$X ... $end' section body; body tokens are not items.
     /// Sets left_open when the range ended WITHOUT the closing '$end' —
-    /// i.e. the body may continue in the next worker (review F4-v2: only
+    /// i.e. the body may continue in the next worker (only
     /// a body SPANNING a split makes byte-level anchors unsound; a body
     /// fully contained in one worker is handled by that worker's own
     /// context and never needs a fallback).
@@ -572,7 +572,7 @@ impl Builder {
                 // s0/s1: plain token fetch, NO structural rule (Python).
                 // Strengths are OWNED immediately: a later next_token() may
                 // refill the shared buffer and invalidate any TokRef into
-                // it (review P1-3).
+                // it.
                 let s0 = match self.tok.next_token()? {
                     Some(s) => {
                         let owned = self.tok.bytes(s).to_vec();
@@ -756,7 +756,7 @@ pub fn build_from_manifest(
         });
         workers = outs.into_iter().collect::<Result<Vec<_>, String>>()?;
     }
-    // Soundness gate AFTER the fact (review F4, v3): a byte-level split
+    // Soundness gate AFTER the fact: a byte-level split
     // anchor is unsound ONLY when a section body SPANS it — the worker
     // starting mid-body would misread comment text as timestamps. Each
     // worker reports whether its range ended inside an unclosed body;
@@ -802,7 +802,7 @@ pub fn build_from_manifest(
             carried_time = w.last_time;
         }
     }
-    // Defense in depth (review P0-1): a corrupt merge must fail the build,
+    // Defense in depth: a corrupt merge must fail the build,
     // never write a sidecar whose block times a reader would mis-bisect.
     for window in blocks.windows(2) {
         if window[0].3 > window[1].3 {
@@ -828,13 +828,13 @@ pub fn build_from_manifest(
     // header ('8s' magic + 6 u64) = 56; BLOCK = 32; DIRECTORY = 16
     let directory_bytes = 56 + 32 * nblocks as u64 + 16 * symbols.len() as u64;
 
-    // Publish atomically (review P0-2): a concurrent reader must never mmap
+    // Publish atomically: a concurrent reader must never mmap
     // a half-written sidecar, and the fresh-claiming header is written first
     // — an interrupted in-place write would look valid forever.
     let tmp_path = format!("{}.tmp.{}", sidecar_path, std::process::id());
     let threads_used = splits.len() - 1;
     let out = File::create(&tmp_path).map_err(|e| format!("create sidecar: {}", e))?;
-    // Builder-owned cleanup (review finding C): the temp file is removed
+    // Builder-owned cleanup: the temp file is removed
     // unless the rename below publishes it.
     struct TempGuard<'a> { path: &'a str, armed: bool }
     impl Drop for TempGuard<'_> {
@@ -1002,10 +1002,10 @@ fn find_timestamp_split(
             // Only a timestamp that FULLY parses may anchor a split: a
             // malformed '#1.5' would be skipped by the workers' parser
             // (Python's tolerant-reader policy), leaving that worker with
-            // no established time and zero block times (review P0-1). A
+            // no established time and zero block times. A
             // token that is a DECLARED identifier (legal per IEEE 1364
             // 18.2.1) may be a b/r/p operand in the sequential scan, so it
-            // must not be treated as a boundary either (review P2-7).
+            // must not be treated as a boundary either.
             if tok.len() > 1 && tok[0] == b'#' && tok[1].is_ascii_digit() {
                 if symtab.lookup(tok).is_none() {
                     if let Some(tv) = parse_int_bytes(tok)? {

@@ -170,6 +170,69 @@ def test_native_build_carries_fingerprint(tmp_path):
     assert [p.name for p in tmp_path.iterdir() if '.native.' in p.name] == []
 
 
+def _wide_vcd(path, signals=5000, mib=8):
+    """Thousands of 1-bit signals, 20 changes per timestamp: every signal
+    is active in every 1 MiB block, so fine blocks make a big index."""
+    def ident(i):
+        out = ''
+        i += 1
+        while i:
+            i, r = divmod(i - 1, 94)
+            out += chr(33 + r)
+        return out
+    ids = [ident(i) for i in range(signals)]
+    lines = ['$timescale 1ps $end $scope module top $end\n']
+    lines += ['$var wire 1 %s n%d $end\n' % (c, i) for i, c in enumerate(ids)]
+    lines.append('$upscope $end $enddefinitions $end\n')
+    size = sum(map(len, lines))
+    t = k = 0
+    while size < mib << 20:
+        record = '#%d\n' % t + ''.join('%d%s\n' % ((k + j) & 1, ids[(k * 20 + j) % signals])
+                                       for j in range(20))
+        lines.append(record)
+        size += len(record)
+        t += 10
+        k += 1
+    path.write_text(''.join(lines))
+    return path
+
+
+def test_automatic_block_size(tmp_path):
+    """Default builds start at 1 MiB blocks and coarsen only when the
+    index would exceed its budget; an explicit block size is kept."""
+    dense = _big_vcd(tmp_path)
+    stats = va.build_index_best(str(dense), str(tmp_path / 'd.vcidx'))
+    assert stats['block_bytes'] == va.AUTO_BLOCK_BYTES and stats['coarsens'] == 0
+    wide = _wide_vcd(tmp_path / 'wide.vcd')
+    budget = va.index_budget(os.path.getsize(wide))
+    stats = va.build_index_best(str(wide), str(tmp_path / 'w.vcidx'))
+    assert stats['block_bytes'] > va.AUTO_BLOCK_BYTES, stats
+    assert stats['index_bytes'] <= budget, stats
+    explicit = va.build_index_best(str(wide), str(tmp_path / 'x.vcidx'), 1 << 20)
+    assert explicit['block_bytes'] == 1 << 20 and explicit['coarsens'] == 0
+    assert explicit['index_bytes'] > budget
+    # the coarsened sidecar answers like the plain parser
+    raw = va.VCDParser(str(wide))
+    idx = va.IndexedVCD(wide, tmp_path / 'w.vcidx', enforce_gate=False)
+    try:
+        span = idx.blocks[-1][3]
+        for frac in (10, 55, 95):
+            t = span * frac // 100
+            assert idx.state_at(t) == raw.state_at(t), frac
+    finally:
+        idx.close()
+
+
+def test_index_command_reports_block_size(tmp_path):
+    src = _big_vcd(tmp_path)
+    result = run_cli(['--json', 'index', str(src)])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['block_bytes'] == va.AUTO_BLOCK_BYTES
+    text = run_cli(['index', str(src), '--force', '--block-mib', '2'])
+    assert text.returncode == 0, text.stderr
+    assert 'x 2 MiB' in text.stdout and '(automatic)' not in text.stdout
+
+
 def test_malformed_timestamp_is_not_a_bus_commit(tmp_path):
     """'#1.5' between bit writes must not flush the bus early: the
     reference parser skips malformed timestamps entirely (P1-2)."""

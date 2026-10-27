@@ -239,21 +239,50 @@ def raw_symbols(parser):
     return out
 
 
-def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
+# Index granularity. A point query parses the queried block from its start
+# (~0.15 s per MiB in pure Python), so its cost follows the block size, while
+# the sidecar holds one entry per (signal, block) that saw a change. Builds
+# therefore start at AUTO_BLOCK_BYTES and merge neighbouring blocks pairwise
+# (doubling the block size) only while the sidecar would exceed
+# index_budget(): typical dumps keep 1 MiB blocks at ~0.2% of the source;
+# wide designs with thousands of signals active in every block coarsen until
+# they fit (a 20k-signal dump stops at 8 MiB, 1.6%). An explicit block size
+# (`index --block-mib`) is used as given.
+AUTO_BLOCK_BYTES = 1 << 20
+
+
+def index_budget(source_bytes):
+    """Largest sidecar the automatic block size accepts: 2% of the source."""
+    return max(source_bytes // 50, 256 << 10)
+
+
+def _sidecar_bytes(nblocks, nsymbols, pairs, entry_bytes):
+    """Size of a sidecar layout, fingerprint footer included."""
+    return (HEADER.size + BLOCK.size * nblocks + DIRECTORY.size * nsymbols
+            + entry_bytes * pairs + FOOTER.size)
+
+
+def _merge_block_pairs(blocks):
+    """Blocks 2k and 2k+1 as one block, or None when a merged block would no
+    longer fit the u32 record offsets of the postings."""
+    merged = [(blocks[i][0], blocks[min(i + 1, len(blocks) - 1)][1],
+               blocks[i][2], blocks[min(i + 1, len(blocks) - 1)][3])
+              for i in range(0, len(blocks), 2)]
+    if any(end - begin > 0xFFFFFFFF for begin, end, _t0, _t1 in merged):
+        return None
+    return merged
+
+
+def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=None):
+    """Pure-Python builder (the reference the native one mirrors). With
+    max_index_bytes, neighbouring blocks are merged pairwise while the
+    sidecar would exceed it, as the native builder does."""
     start_clock = time.perf_counter()
     parser = VCDParser(str(path))
-    header_seconds = time.perf_counter() - start_clock
     symbols = raw_symbols(parser)
     raw_id = {s: i for i, s in enumerate(symbols)}
-    memberships = [array('I') for _ in symbols]
-    last_positions = [array('I') for _ in symbols]
-    modes = bytearray(len(symbols))  # 0: block/last-offset pairs; 1: membership runs
-    payload_bytes = 0
-    conversions = 0
-    coarsens = 0
-    initial_block_bytes = block_bytes
-    if budget_bytes is not None and HEADER.size + DIRECTORY.size*len(symbols) > budget_bytes:
-        raise ValueError('budget smaller than fixed signal directory; time-only fallback required')
+    bids = [array('I') for _ in symbols]
+    offsets = [array('I') for _ in symbols]  # last record, relative to block start
     blocks = []
     recent = {}
     current = 0
@@ -262,95 +291,18 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
     block_initial = 0
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
     stat_before = os.fstat(fd)
-    def as_runs(bids):
-        runs = array('I')
-        for bid in bids:
-            if runs and runs[-1] == bid:
-                runs[-1] = bid+1
-            else:
-                runs.extend((bid,bid+1))
-        return runs
-    def enforce_budget():
-        nonlocal payload_bytes, conversions, coarsens, block_bytes, blocks
-        if budget_bytes is None:
-            return
-        fixed = HEADER.size + DIRECTORY.size*len(symbols)
-        target = int(budget_bytes*0.75)
-        # Structural choice, independent of which signals have been queried:
-        # very dense postings lose fine pointers in exchange for short ranges.
-        for sid,bids in enumerate(memberships):
-            if modes[sid] or len(bids)<8:continue
-            runs=0;previous=-2
-            for bid in bids:
-                if bid!=previous+1:runs+=1
-                previous=bid
-            if runs*8<=len(bids):
-                memberships[sid]=as_runs(bids)
-                last_positions[sid]=array('I')
-                modes[sid]=1;payload_bytes-=(len(bids)-runs)*8;conversions+=1
-        if fixed + len(blocks)*BLOCK.size + payload_bytes <= target:
-            return
-        candidates = []
-        for sid,bids in enumerate(memberships):
-            if modes[sid] or len(bids)<4:
-                continue
-            runs = 0; previous = -2
-            for bid in bids:
-                if bid != previous+1:runs += 1
-                previous=bid
-            saving=(len(bids)-runs)*POSTING.size
-            if saving>0:candidates.append((saving,sid))
-        for saving,sid in sorted(candidates,reverse=True):
-            memberships[sid]=as_runs(memberships[sid])
-            last_positions[sid]=array('I')
-            modes[sid]=1; payload_bytes-=saving; conversions+=1
-            if fixed+len(blocks)*BLOCK.size+payload_bytes<=target:
-                return
-        while fixed+len(blocks)*BLOCK.size+payload_bytes>target:
-            if len(blocks)<=1:
-                if fixed+len(blocks)*BLOCK.size+payload_bytes<=budget_bytes:return
-                raise ValueError('budget cannot hold even a single-block directory')
-            old=blocks
-            blocks=[(old[i][0],old[min(i+1,len(old)-1)][1],
-                     old[i][2],old[min(i+1,len(old)-1)][3]) for i in range(0,len(old),2)]
-            for sid in range(len(symbols)):
-                if modes[sid]:
-                    updated=array('I')
-                    for i in range(0,len(memberships[sid]),2):
-                        a=memberships[sid][i]//2;b=(memberships[sid][i+1]+1)//2
-                        if updated and a<=updated[-1]:updated[-1]=max(updated[-1],b)
-                        else:updated.extend((a,b))
-                    memberships[sid]=updated
-                else:
-                    bids=array('I');positions=array('I')
-                    for bid,relative in zip(memberships[sid],last_positions[sid]):
-                        newbid=bid//2
-                        newrelative=old[bid][0]+relative-blocks[newbid][0]
-                        if bids and bids[-1]==newbid:positions[-1]=newrelative
-                        else:bids.append(newbid);positions.append(newrelative)
-                    memberships[sid]=bids;last_positions[sid]=positions
-            payload_bytes=sum(len(values)*(4 if modes[sid] else 8)
-                              for sid,values in enumerate(memberships))
-            block_bytes*=2;coarsens+=1
     def flush(end):
-        nonlocal recent, block_start, block_initial, payload_bytes
+        nonlocal recent, block_start, block_initial
         if end <= block_start:
             return
         block_id = len(blocks)
         blocks.append((block_start, end, block_initial, current))
         for sid, position in recent.items():
-            if modes[sid]:
-                if memberships[sid] and memberships[sid][-1]==block_id:
-                    memberships[sid][-1]=block_id+1
-                else:
-                    memberships[sid].extend((block_id,block_id+1));payload_bytes+=8
-            else:
-                memberships[sid].append(block_id)
-                last_positions[sid].append(position - block_start);payload_bytes+=8
+            bids[sid].append(block_id)
+            offsets[sid].append(position - block_start)
         recent = {}
         block_start = end
         block_initial = current
-        enforce_budget()
     try:
         for position, before, kind, after, symbol, _value in items(
                 parser, fd, start, stat_before.st_size):
@@ -366,8 +318,31 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
             raise ValueError('source changed while building index')
     finally:
         os.close(fd)
-    pairs = sum(sum(values[i+1]-values[i] for i in range(0,len(values),2))
-                if modes[sid] else len(values) for sid,values in enumerate(memberships))
+    pairs = sum(len(b) for b in bids)
+    coarsens = 0
+    while (max_index_bytes is not None and len(blocks) > 1
+           and _sidecar_bytes(len(blocks), len(symbols), pairs, POSTING.size)
+           > max_index_bytes):
+        merged = _merge_block_pairs(blocks)
+        if merged is None:
+            break
+        for sid in range(len(symbols)):
+            new_bids = array('I')
+            new_offsets = array('I')
+            for bid, relative in zip(bids[sid], offsets[sid]):
+                new = bid // 2
+                relative += blocks[bid][0] - merged[new][0]
+                if new_bids and new_bids[-1] == new:
+                    new_offsets[-1] = relative  # the later record is the last
+                else:
+                    new_bids.append(new)
+                    new_offsets.append(relative)
+            bids[sid] = new_bids
+            offsets[sid] = new_offsets
+        blocks = merged
+        pairs = sum(len(b) for b in bids)
+        coarsens += 1
+    block_bytes <<= coarsens
     posting_start = HEADER.size + BLOCK.size * len(blocks) + DIRECTORY.size * len(symbols)
     # Atomic publication: concurrent readers must never see a half-written
     # sidecar whose fresh-claiming header already matches.
@@ -380,14 +355,12 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
         for block in blocks:
             out.write(BLOCK.pack(*block))
         location = posting_start
-        for sid,posting in enumerate(memberships):
-            count=len(posting)//2 if modes[sid] else len(posting)
-            out.write(DIRECTORY.pack(location,count,modes[sid]))
-            location += count * POSTING.size
-        for sid,(bids, offsets) in enumerate(zip(memberships, last_positions)):
+        for posting in bids:
+            out.write(DIRECTORY.pack(location, len(posting), 0))
+            location += len(posting) * POSTING.size
+        for posting, posting_offsets in zip(bids, offsets):
             buf = bytearray()
-            entries=zip(bids[::2],bids[1::2]) if modes[sid] else zip(bids,offsets)
-            for bid, off in entries:
+            for bid, off in zip(posting, posting_offsets):
                 buf.extend(POSTING.pack(bid, off))
                 if len(buf) >= 1 << 20:
                     out.write(buf); buf.clear()
@@ -409,34 +382,13 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
                 os.unlink(sidecar_tmp)
             except OSError:
                 pass
-    # Compare encodings WITHOUT pretending they are actual measured sidecars.
-    membership_delta_bytes = 0
-    membership_bitset_bytes = 0
-    for sid,bids in enumerate(memberships):
-        if modes[sid]:
-            membership_delta_bytes+=sum(bids[i+1]-bids[i] for i in range(0,len(bids),2))
-            membership_bitset_bytes+=(len(blocks)+7)//8 if bids else 0
-            continue
-        previous = -1
-        for bid in bids:
-            delta = bid - previous
-            membership_delta_bytes += max(1, (delta.bit_length() + 6)//7)
-            previous = bid
-        membership_bitset_bytes += (len(blocks)+7)//8 if bids else 0
     return {
-        'build_s': time.perf_counter()-start_clock,
-        'header_s': header_seconds, 'source_bytes': stat_after.st_size,
+        'build_s': time.perf_counter() - start_clock,
+        'source_bytes': stat_after.st_size,
         'index_bytes': os.path.getsize(sidecar), 'blocks': len(blocks),
         'raw_symbols': len(symbols), 'signal_block_pairs': pairs,
-        'membership_delta_payload_bytes': membership_delta_bytes,
-        'membership_bitset_payload_bytes': membership_bitset_bytes,
-        'directory_bytes': HEADER.size + BLOCK.size*len(blocks) + DIRECTORY.size*len(symbols),
-        'max_block_bytes': max((b[1]-b[0] for b in blocks), default=0),
-        'raw_block_bytes': block_bytes,
-        'initial_block_bytes': initial_block_bytes,
-        'budget_bytes': budget_bytes,
-        'run_encoded_signals': sum(modes),
-        'coarsen_count': coarsens,
+        'block_bytes': block_bytes, 'coarsens': coarsens,
+        'max_block_bytes': max((b[1] - b[0] for b in blocks), default=0),
     }
 
 
@@ -889,7 +841,7 @@ def sidecar_path(vcd_path):
     return str(vcd_path) + '.vcidx'
 
 
-def native_index_build(path, sidecar, block_bytes):
+def native_index_build(path, sidecar, block_bytes, max_index_bytes=None):
     """Build via the embedded native library (full variant only).
 
     Fully automatic: the pure-Python builder is the fallback for every
@@ -902,7 +854,7 @@ def native_index_build(path, sidecar, block_bytes):
         return None
     built = '{}.native.{}'.format(sidecar, os.getpid())
     try:
-        stats = build(path, built, block_bytes)
+        stats = build(path, built, block_bytes, max_index_bytes or 0)
         if stats is None:
             return None
         _seal_sidecar(path, built, sidecar)
@@ -915,14 +867,20 @@ def native_index_build(path, sidecar, block_bytes):
     return stats
 
 
-def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
-    """Native build when the running file carries one, pure Python else."""
+def build_index_best(path, sidecar, block_bytes=None, threads=None):
+    """Native build when the running file carries one, pure Python else.
+    block_bytes None picks the block size automatically (AUTO_BLOCK_BYTES,
+    coarsened to index_budget()); an explicit size is used as given."""
     if os.environ.get('VCD_ANALYZER_FAIL_INDEX'):
         raise ValueError('simulated index failure (VCD_ANALYZER_FAIL_INDEX)')
     if threads is not None:
         os.environ['VCD_ANALYZER_INDEX_THREADS'] = str(threads)
+    budget = None
+    if block_bytes is None:
+        block_bytes = AUTO_BLOCK_BYTES
+        budget = index_budget(os.path.getsize(path))
     try:
-        stats = native_index_build(path, sidecar, block_bytes)
+        stats = native_index_build(path, sidecar, block_bytes, budget)
     except ValueError as error:
         # The native builder is ASCII-only and refuses some exotic tokens;
         # and build-fatal conditions (non-monotonic timestamps) re-raise
@@ -938,7 +896,7 @@ def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
         # the native builder, so say so instead of silently ignoring it.
         _warn('VCD_ANALYZER_INDEX_THREADS is ignored: no native builder '
               'is available on this platform', cat='index_threads_hint')
-    stats = build_index(path, sidecar, block_bytes)
+    stats = build_index(path, sidecar, block_bytes, budget)
     stats['builder'] = 'python'
     return stats
 
@@ -975,12 +933,11 @@ def try_index(vcd_path):
 
 _AUTO_SCRIPT_PATH = None  # set by main(): the running single-file script
 
-# Smallest source a query builds an index for in the background. An indexed
-# point query still parses up to one 8 MiB block (~0.1-1.8 s), while a plain
-# scan grows with the queried time (~4 s at the end of 50 MB): around 30 MB
-# the two break even, at 50 MiB the index is ~2x faster on average and ~40x
-# at the end of the dump. Smaller files are left untouched; `index` still
-# builds one on request at any size.
+# Smallest source a query builds an index for in the background. With 1 MiB
+# blocks an indexed point query takes ~0.1-0.3 s at any size, while a plain
+# scan grows with the queried time (~0.9 s at the end of 10 MB, ~4 s at the
+# end of 50 MB). Smaller files are left untouched (nothing is written next
+# to them); `index` still builds one on request at any size.
 _AUTO_INDEX_MIN_BYTES = 50 << 20
 
 
@@ -1221,7 +1178,7 @@ def _build_index_command(vcd, args):
     try:
         if os.path.exists(target) and not (args.force or auto):
             sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
-        block_bytes = args.block_mib << 20
+        block_bytes = args.block_mib << 20 if args.block_mib else None
         try:
             stats = build_index_best(args.file, target, block_bytes,
                                      threads=getattr(args, 'threads', None))
@@ -1243,6 +1200,7 @@ def _build_index_command(vcd, args):
          'index_pct': round(100.0 * stats.get('index_bytes', 0)
                             / max(1, stats.get('source_bytes', 1)), 4),
          'blocks': stats.get('blocks'),
+         'block_bytes': stats.get('block_bytes'),
          'raw_symbols': stats.get('raw_symbols'),
          'signal_block_pairs': stats.get('signal_block_pairs'),
          'threads': stats.get('threads', 1),
@@ -1257,7 +1215,9 @@ def _build_index_command(vcd, args):
     print('Builder  : {}'.format(builder))
     print('Source   : {:,} bytes'.format(r['source_bytes']))
     print('Index    : {:,} bytes ({:.4f}%)'.format(r['index_bytes'], r['index_pct']))
-    print('Blocks   : {} x {} MiB'.format(r['blocks'], args.block_mib))
+    print('Blocks   : {} x {:g} MiB{}'.format(
+        r['blocks'], r['block_bytes'] / (1 << 20),
+        '' if args.block_mib else ' (automatic)'))
     print('Symbols  : {} raw, {:,} signal-block pairs'.format(
         r['raw_symbols'], r['signal_block_pairs']))
     print('Time     : {:.3f}s'.format(r['build_s']))

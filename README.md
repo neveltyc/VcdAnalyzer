@@ -130,6 +130,13 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   for any size on request.
 - **Queries use it automatically** whenever the sidecar is fresh; output is
   identical, only faster (minutes-long point lookups become sub-second).
+- **Block size is automatic.** A point query re-parses the indexed block it
+  lands in, so small blocks keep queries fast (~0.1-0.2 s with 1 MiB blocks),
+  while the index grows with every (signal, block) pair that saw a change.
+  Builds start at 1 MiB and merge neighbouring blocks only while the index
+  would exceed 2% of the dump — typical dumps stay at 1 MiB (~0.2% index);
+  wide designs with thousands of signals active everywhere coarsen until
+  they fit. `index --block-mib N` forces a size.
 - **Freshness is `(size, mtime_ns)` plus a content fingerprint** — the
   header records size and mtime, and a footer hashes eight 4 KiB samples
   spread over the source (header and tail included), so a different dump

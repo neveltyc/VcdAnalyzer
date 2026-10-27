@@ -15,6 +15,7 @@
 //
 //   data_start <u64>
 //   block_bytes <u64>
+//   budget_bytes <u64>          (0 = none; see "index budget" below)
 //   max_token_len <usize>
 //   symbols <count>
 //   <symbol id code>            (one per line, raw_symbols() order)
@@ -55,6 +56,9 @@ use std::os::raw::{c_char, c_int, c_uint};
 use std::time::Instant;
 
 const READ_CHUNK: usize = 16 << 20;
+/// Fingerprint footer the Python side appends after publication (8-byte
+/// magic, two u32, 16-byte digest); counted against the index budget.
+const FOOTER_BYTES: u64 = 32;
 
 fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
@@ -644,6 +648,7 @@ pub fn build_from_manifest(
     };
     let data_start = next_num("data_start")?;
     let block_bytes = next_num("block_bytes")?;
+    let budget_bytes = next_num("budget_bytes")?;
     let max_token_len = next_num("max_token_len")? as usize;
     let sym_count = next_num("symbols")? as usize;
     if block_bytes == 0 || block_bytes > (4096u64 << 20) {
@@ -820,6 +825,50 @@ pub fn build_from_manifest(
         die!("source changed while building index");
     }
 
+    // -- index budget --------------------------------------------------------
+    // Builds start fine (a point query parses its block from the start, so
+    // small blocks keep queries cheap) and merge neighbouring blocks pairwise
+    // — doubling the block size — while the sidecar would exceed
+    // budget_bytes; 0 means no budget. Same policy as the Python builder's
+    // max_index_bytes: wide designs with many signals active in every block
+    // coarsen, everything else keeps the requested size.
+    let mut block_bytes = block_bytes;
+    let mut coarsens: u32 = 0;
+    let sidecar_bytes = |nb: usize, pairs: u64| -> u64 {
+        let entry: u64 = if nb <= 65535 { 6 } else { 8 };
+        56 + 32 * nb as u64 + 16 * symbols.len() as u64 + entry * pairs + FOOTER_BYTES
+    };
+    while budget_bytes > 0 && blocks.len() > 1 {
+        let pairs: u64 = postings.iter().map(|p| p.len() as u64).sum();
+        if sidecar_bytes(blocks.len(), pairs) <= budget_bytes {
+            break;
+        }
+        let merged: Vec<(u64, u64, u64, u64)> = blocks.chunks(2)
+            .map(|c| (c[0].0, c[c.len() - 1].1, c[0].2, c[c.len() - 1].3))
+            .collect();
+        if merged.iter().any(|b| b.1 - b.0 > u32::MAX as u64) {
+            break; // record offsets must stay u32
+        }
+        for plist in postings.iter_mut() {
+            let mut out: Vec<(u32, u32)> = Vec::with_capacity(plist.len());
+            for &(bid, rel) in plist.iter() {
+                let nb = bid / 2;
+                let rel = (blocks[bid as usize].0 + rel as u64 - merged[nb as usize].0) as u32;
+                match out.last_mut() {
+                    Some(last) if last.0 == nb => last.1 = rel, // the later record is the last
+                    _ => out.push((nb, rel)),
+                }
+            }
+            *plist = out;
+        }
+        blocks = merged;
+        block_bytes = block_bytes.saturating_mul(2);
+        coarsens += 1;
+    }
+    if coarsens > 0 {
+        max_block_bytes = blocks.iter().map(|b| b.1 - b.0).max().unwrap_or(0);
+    }
+
     let nblocks = blocks.len();
     let narrow = nblocks <= 65535;
     let mode: u32 = if narrow { 2 } else { 0 };
@@ -885,10 +934,10 @@ pub fn build_from_manifest(
     let index_bytes = std::fs::metadata(sidecar_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(format!(
-        "{{\"build_s\":{:.4},\"source_bytes\":{},\"index_bytes\":{},\"blocks\":{},\"raw_symbols\":{},\"signal_block_pairs\":{},\"max_block_bytes\":{},\"posting_mode\":{},\"threads\":{},\"parallel_fallback\":{}}}",
+        "{{\"build_s\":{:.4},\"source_bytes\":{},\"index_bytes\":{},\"blocks\":{},\"block_bytes\":{},\"coarsens\":{},\"raw_symbols\":{},\"signal_block_pairs\":{},\"max_block_bytes\":{},\"posting_mode\":{},\"threads\":{},\"parallel_fallback\":{}}}",
         started.elapsed().as_secs_f64(), size0, index_bytes, nblocks,
-        symbols.len(), pairs, max_block_bytes, mode, threads_used,
-        parallel_fallback
+        block_bytes, coarsens, symbols.len(), pairs, max_block_bytes, mode,
+        threads_used, parallel_fallback
     ))
 }
 
@@ -900,7 +949,7 @@ fn put_u64(w: &mut BufWriter<File>, v: u64) -> Result<(), String> { w.write_all(
 
 use std::ffi::CStr;
 
-pub const ABI_VERSION: c_uint = 1;
+pub const ABI_VERSION: c_uint = 2; // 2: manifest carries budget_bytes
 
 fn write_cstr(dst: *mut c_char, cap: usize, text: &str) {
     if dst.is_null() || cap == 0 { return; }

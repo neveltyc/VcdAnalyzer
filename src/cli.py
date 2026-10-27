@@ -46,8 +46,9 @@ def main():
 
     sp = sub.add_parser('index', help='build the optional .vcidx sidecar for fast random access')
     sp.add_argument('file', metavar='<file>')
-    sp.add_argument('--block-mib', type=int, default=8, metavar='N',
-                    help='index block size in MiB, 1..4096 (default 8)')
+    sp.add_argument('--block-mib', type=int, default=None, metavar='N',
+                    help='index block size in MiB, 1..4096 (default: automatic — '
+                         '1 MiB, doubled while the index would exceed 2%% of the file)')
     sp.add_argument('--force', action='store_true',
                     help='rebuild even if the sidecar already exists')
     sp.add_argument('--output', metavar='PATH', default=None,

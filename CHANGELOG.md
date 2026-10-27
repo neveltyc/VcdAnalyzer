@@ -9,6 +9,11 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 
 - Automatic background index builds start only for sources of 50 MiB or more (was 128 KiB): below that a plain
   scan answers in seconds and a query never writes next to the dump. `index` still builds at any size.
+- The index block size is automatic (was a fixed 8 MiB): builds start at 1 MiB blocks and merge neighbouring
+  blocks only while the sidecar would exceed 2% of the source. Indexed point queries drop from ~0.6-1.2 s to
+  ~0.1-0.2 s on typical dumps (index ~0.2% of the source); wide designs with thousands of signals active in every
+  block coarsen until they fit. Both builders apply the same policy; `index --block-mib N` still forces a size and
+  `index` reports the size used (JSON `block_bytes`).
 - Sidecar freshness adds a content fingerprint to `(size, mtime_ns)`: a footer hashes eight 4 KiB samples spread
   over the source, so a different dump with the same size and a preserved mtime (`cp -p`, `rsync -t`, tar) is
   detected at the cost of a few small reads per query. Sidecars written by 1.6.0 are treated as stale and rebuilt.

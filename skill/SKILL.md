@@ -140,7 +140,7 @@ Key JSON fields: `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`. Only signals 
 ### 7. index — build the acceleration sidecar (full variant)
 
 ```bash
-python3 vcd_analyzer.py index <file> [--block-mib 8] [--force] [--output PATH]
+python3 vcd_analyzer.py index <file> [--block-mib N] [--force] [--output PATH]
 ```
 
 Builds `<file>.vcidx`. Every query command then uses it automatically when
@@ -152,7 +152,9 @@ explicitly, which reports the slower pure-Python mechanism). Rebuild is
 skipped with a message while the dump still looks open for writing. A sidecar
 whose source changed (size, mtime or sampled content) is ignored and rebuilt.
 A failed background build leaves `<file>.vcidx.log`. Key JSON fields:
-`builder`, `index_bytes`, `blocks`, `build_s`.
+`builder`, `index_bytes`, `blocks`, `block_bytes`, `build_s`. Leave `--block-mib` unset:
+the block size is chosen automatically (1 MiB, larger only when the index would
+exceed 2% of the dump).
 
 ### 8. search — condition-based query (three modes)
 

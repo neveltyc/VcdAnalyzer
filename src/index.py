@@ -975,11 +975,13 @@ def try_index(vcd_path):
 
 _AUTO_SCRIPT_PATH = None  # set by main(): the running single-file script
 
-# Smallest source a query builds an index for in the background. Below it a
-# plain scan answers in a few seconds and an index saves little (an indexed
-# point query still parses up to one 8 MiB block), so files that small are
-# left untouched; `index` still builds one on request at any size.
-_AUTO_INDEX_MIN_BYTES = 100 << 20
+# Smallest source a query builds an index for in the background. An indexed
+# point query still parses up to one 8 MiB block (~0.1-1.8 s), while a plain
+# scan grows with the queried time (~4 s at the end of 50 MB): around 30 MB
+# the two break even, at 50 MiB the index is ~2x faster on average and ~40x
+# at the end of the dump. Smaller files are left untouched; `index` still
+# builds one on request at any size.
+_AUTO_INDEX_MIN_BYTES = 50 << 20
 
 
 def _sidecar_fresh(vcd_path, sidecar):

@@ -66,7 +66,7 @@ def test_output_link_failure_warns(tmp_path):
 
 def _run_cli_any_size(args):
     """Run the CLI with the automatic-build size floor lifted, so the small
-    synthetic files here exercise the same path a 100 MiB dump takes."""
+    synthetic files here exercise the same path a 50 MiB dump takes."""
     import subprocess
     from conftest import SCRIPT
     code = ('import sys; sys.argv = sys.argv[1:]; sys.path.insert(0, {!r}); '

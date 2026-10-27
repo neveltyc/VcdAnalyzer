@@ -7,7 +7,7 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 
 ### Changed
 
-- Automatic background index builds start only for sources of 100 MiB or more (was 128 KiB): below that a plain
+- Automatic background index builds start only for sources of 50 MiB or more (was 128 KiB): below that a plain
   scan answers in seconds and a query never writes next to the dump. `index` still builds at any size.
 - Sidecar freshness adds a content fingerprint to `(size, mtime_ns)`: a footer hashes eight 4 KiB samples spread
   over the source, so a different dump with the same size and a preserved mtime (`cp -p`, `rsync -t`, tar) is

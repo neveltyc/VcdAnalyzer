@@ -12,12 +12,11 @@
 # cargo-zigbuild may run the pip ziglang (`python3 -m ziglang`) rather than
 # a `zig` on PATH, so both are checked.
 #
-# The libraries embedded in vcd_analyzer.py are the CI build: download the
-# `native-dist` artifact of the CI `native` job into native/dist/ and run
-# `python _make.py`. Local builds with the pinned toolchain match it byte
-# for byte on Linux and Windows; the macOS library differs in its LC_UUID
-# (and the ad-hoc signature hashes over it), which zig's linker derives
-# from machine-specific input paths.
+# Builds with the pinned toolchain are byte-identical across machines and
+# runs, except that zig's Mach-O linker writes a different LC_UUID into the
+# macOS library on every build (and the ad-hoc code signature hashes it);
+# `_make.py --check-native` compares dylibs with those two excluded. The
+# released libraries are the CI `native` job's `native-dist` artifact.
 set -e
 ZIG_VERSION=0.16.0
 ZIGBUILD_VERSION=0.24.0

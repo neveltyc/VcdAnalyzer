@@ -248,8 +248,9 @@ python _make.py --check-native native/dist    # 内嵌库是否等于本次构�
 
 CI 的 `native` 任务每次 push 都做同样的构建，内嵌库与之不一致即失败。
 修改 `native/` 后，以它上传的 `native-dist` 产物为准嵌入（解压到 `native/dist/`，
-再运行 `python _make.py`）：用锁定工具链在本地构建的 Linux 和 Windows 库与它逐字节
-一致；macOS 库的 `LC_UUID` 会不同——zig 的链接器会把机器相关的输入路径算进去。
+再运行 `python _make.py`）。用锁定工具链的构建在任何机器上都逐字节一致，唯一例外是
+zig 的 Mach-O 链接器每次构建都会给 macOS 库写入新的 `LC_UUID`；`--check-native`
+比较时会排除该 UUID 及覆盖它的代码签名。
 
 ## 测试
 

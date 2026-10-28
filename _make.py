@@ -8,8 +8,9 @@ Usage:
     python _make.py --check         # verify both tracked files against src/
     python _make.py --check-native DIR
                                     # verify the libraries embedded in
-                                    # vcd_analyzer.py are byte-identical to
-                                    # a fresh build in DIR (CI)
+                                    # vcd_analyzer.py match a fresh build
+                                    # in DIR (CI; dylibs without their
+                                    # per-build LC_UUID and signature)
 
 The module order matches the Part numbering in the assembled file:
 
@@ -63,6 +64,7 @@ import base64
 import hashlib
 import lzma
 import re
+import struct
 import sys
 import textwrap
 from pathlib import Path
@@ -402,19 +404,50 @@ def check_full() -> int:
     return _report(FULL_OUTPUT.name, same, '' if same else 'differs from src/; rerun _make.py')
 
 
+_MACHO_64 = 0xfeedfacf
+_LC_UUID = 0x1b
+_LC_CODE_SIGNATURE = 0x1d
+
+
+def _comparable(data, ext):
+    """The bytes a rebuild must reproduce. zig's Mach-O linker writes a
+    different LC_UUID on every build (two CI runs of one commit differ),
+    and the ad-hoc code signature hashes the pages that hold it; both are
+    zeroed for the comparison — every other byte of the dylib must match.
+    Other formats compare as-is (build_all.sh zeroes the PE timestamp)."""
+    if ext != '.dylib':
+        return data
+    out = bytearray(data)
+    magic, _cpu, _sub, _type, ncmds = struct.unpack_from('<IiiII', data, 0)
+    if magic != _MACHO_64:
+        return data
+    offset = 32  # mach_header_64
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from('<II', data, offset)
+        if cmd == _LC_UUID:
+            out[offset + 8:offset + 24] = bytes(16)
+        elif cmd == _LC_CODE_SIGNATURE:
+            start, length = struct.unpack_from('<II', data, offset + 8)
+            out[start:start + length] = bytes(length)
+        offset += size
+    return bytes(out)
+
+
 def check_native(dist) -> int:
-    """Every embedded library must be byte-identical to the build in dist."""
+    """Every embedded library must match the build in dist: byte for byte,
+    except the per-build Mach-O UUID and signature (see _comparable)."""
     entries = _lib_entries_from_release(_read_release(FULL_OUTPUT))
     embedded = _decode_entries(entries)
     failures = 0
-    for key, filename, _ext in NATIVE_LIBS:
+    for key, filename, ext in NATIVE_LIBS:
         path = Path(dist) / filename
         if not path.exists():
             failures += _report(filename, False, 'missing from {}'.format(dist))
             continue
-        built = hashlib.sha256(path.read_bytes()).hexdigest()
-        ship = hashlib.sha256(embedded[key]).hexdigest()
-        failures += _report(filename, built == ship, '' if built == ship else
+        built = hashlib.sha256(_comparable(path.read_bytes(), ext)).hexdigest()
+        ship = hashlib.sha256(_comparable(embedded[key], ext)).hexdigest()
+        note = ' (LC_UUID and code signature excluded)' if ext == '.dylib' else ''
+        failures += _report(filename, built == ship, note if built == ship else
                             'embedded {} != fresh build {}; rebuild native/dist and '
                             'rerun _make.py --full'.format(ship[:16], built[:16]))
     return failures

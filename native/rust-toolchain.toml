@@ -1,6 +1,6 @@
-# Pinned so local builds match the CI `native` job (byte for byte on Linux
-# and Windows; see build_all.sh for macOS). That job rebuilds native/dist/
-# and fails when the libraries embedded in vcd_analyzer.py differ from it.
+# Pinned so local builds match the CI `native` job (byte for byte, but for
+# the per-build macOS LC_UUID; see build_all.sh). That job rebuilds
+# native/dist/ and fails when the embedded libraries differ from it.
 [toolchain]
 channel = "1.96.0"
 profile = "minimal"

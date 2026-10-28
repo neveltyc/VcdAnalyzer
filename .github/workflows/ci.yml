@@ -3,8 +3,9 @@
 #      embedded native libraries, each of which must match its recorded
 #      sha256)
 #   2. the embedded native libraries are byte-identical to a fresh build of
-#      native/ with the pinned toolchain (`native` job; its `native-dist`
-#      artifact is the canonical build to embed after changing native/)
+#      native/ with the pinned toolchain, except the macOS dylib's per-build
+#      LC_UUID and code signature (`native` job; its `native-dist` artifact
+#      is the build to embed after changing native/)
 #   3. the full suite passes on the oldest (3.8) and newest supported
 #      Python of each release-critical platform, Windows included: the
 #      full variant's embedded native builder is exercised for real on

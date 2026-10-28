@@ -287,9 +287,10 @@ python _make.py --check-native native/dist    # embedded == this build?
 CI's `native` job runs the same build on every push and fails when the
 embedded libraries differ from it. Its `native-dist` artifact is the build
 to embed after changing `native/` (unzip it into `native/dist/`, then
-`python _make.py`): a local build with the pinned toolchain matches it byte
-for byte on Linux and Windows, while the macOS library differs in its
-`LC_UUID`, which zig's linker derives from machine-specific input paths.
+`python _make.py`). Builds with the pinned toolchain are byte-identical
+everywhere, except that zig's Mach-O linker gives the macOS library a fresh
+`LC_UUID` on every build; `--check-native` compares it with that UUID and
+the code signature over it excluded.
 
 ## Tests
 

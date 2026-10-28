@@ -101,7 +101,6 @@ import json
 import argparse
 import tempfile
 import time
-import hashlib
 from collections import defaultdict
 from fractions import Fraction
 from functools import lru_cache

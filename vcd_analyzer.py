@@ -101,9 +101,9 @@ import json
 import argparse
 import tempfile
 import time
-import hashlib
 # -- full variant only: index engine (_make.py drops this block from lite) --
 import bisect
+import hashlib
 import mmap
 import struct
 import subprocess

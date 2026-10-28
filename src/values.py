@@ -3,6 +3,28 @@
 # ================================================================
 
 
+# Exact integer context for _decimal_text: no rounding at any width.
+_DECIMAL_EXACT = decimal.Context(prec=decimal.MAX_PREC, Emax=decimal.MAX_EMAX)
+
+
+def _decimal_text(n):
+    """Decimal digits of a non-negative int, whatever the interpreter allows.
+
+    str(int) refuses values beyond sys.get_int_max_str_digits() decimal
+    digits — 4300 by default on 3.11+ and on the 3.8.14+/3.9.14+/3.10.7+
+    security releases (CVE-2020-10735), none before them, and anything
+    PYTHONINTMAXSTRDIGITS says (down to 640). fmt_val used to fall back to
+    binary when it refused, so a vector's format depended on its value, the
+    Python patch level and the environment. Values below 2**2048 (at most
+    617 digits) are under every possible limit and keep the fast str();
+    wider ones go through the decimal module, which has no such limit and
+    gives the same digits everywhere.
+    """
+    if n.bit_length() <= 2048:
+        return str(n)
+    return str(_DECIMAL_EXACT.create_decimal(n))
+
+
 def fmt_val(value, info):
     """Format signal value per IEEE 1364-2005 18.2.2.
 
@@ -42,7 +64,7 @@ def fmt_val(value, info):
     try:
         d = int(value, 2)
         hw = max((width + 3) // 4, 1)
-        return f'{d} (0x{format(d, "x").zfill(hw)})'
+        return f'{_decimal_text(d)} (0x{format(d, "x").zfill(hw)})'
     except ValueError:
         return 'b' + value
 

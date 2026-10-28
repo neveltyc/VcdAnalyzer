@@ -5,7 +5,15 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 
 ## Unreleased
 
+### Added
+
+- `-o/--output FILE` on every query command: the whole result goes to FILE (published atomically) and stdout gets
+  a one-line receipt — lines, bytes and path, a JSON object under `--json`.
+
 ### Changed
+
+- Output to an interactive terminal stops after 1 MiB with an `>> OUTPUT CUT` notice pointing to `--output` or a
+  pipe; pipes and redirects still receive everything. A `--limit 0 dump` of a big waveform is hundreds of MB.
 
 - Automatic background index builds start only for sources of 10 MiB or more (was 128 KiB): below that a plain
   scan answers in seconds and a query never writes next to the dump. `index` still builds at any size.
@@ -35,6 +43,11 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 - `summary` keys distinct values longer than 32 characters by (length, hash) instead of keeping the value:
   a 1 MB dump of a bit-exploded 16384-bit bus used 612 MB and 6.5 s, now 41 MB and ~0.5 s. A hash
   collision (~1e-10 within the 65536-value cap) would undercount `unique` by one.
+- Vector values whose decimal form exceeds Python's integer-to-string digit limit (4300 digits by default on
+  3.11+ and on the 3.8.14+/3.9.14+/3.10.7+ security releases, none before, `PYTHONINTMAXSTRDIGITS` otherwise) were
+  printed in binary instead of `decimal (0xhex)`, so the format of a wide vector depended on its value, the Python
+  patch level and the environment. Wide values now always print `decimal (0xhex)`, computed with the `decimal`
+  module above 2048 bits.
 - A sidecar the usage gate rejects (declaration-heavy or tiny dumps) is turned down from its own header instead
   of after a full VCD header parse, which made every query on such a file parse the header twice (~2x slower);
   `index` now warns when it builds a sidecar queries will not use.

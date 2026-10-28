@@ -58,6 +58,7 @@ User wants to know...
 |---|---|
 | `--json` | **Always use this.** Compact JSON to stdout. |
 | `--limit N` | Max results. Default 500. `--limit 0` = unlimited. |
+| `-o FILE`, `--output FILE` | Write the result to FILE; stdout gets a one-line receipt (`{"output","bytes","lines"}` under `--json`). Use with `--limit 0`. |
 | `--verbose` | Extra fields (width, type, raw values). Disables default limit. |
 
 ### Time argument format
@@ -306,6 +307,14 @@ python3 vcd_analyzer.py info sim.vcd --json
 Default `--limit` is 500 results. If `truncated: true` appears in JSON output, there are more results, and a `hint` field spells out what to do about it. Use `--limit 0` for unlimited, or increase the limit. The `total_is_exact` field tells you whether `total` is the true count or a lower bound (streaming commands stop counting after the first unshown result). In text mode a clipped result ends with a `>> TRUNCATED: ...` line.
 
 Unlimited `dump` JSON and `search` output spool result rows to temporary files; sufficient temporary disk space is required.
+
+**Never read an unlimited result into your context.** With `--limit 0`, write it to a file and inspect it with `grep`/`head`:
+
+```bash
+python3 vcd_analyzer.py --json --limit 0 dump sim.vcd --filter 'u_dma.*' -o /tmp/dma.json
+```
+
+A terminal shows at most 1 MiB of output (then `>> OUTPUT CUT`); pipes and redirects are not capped.
 
 ### Time fields in JSON
 

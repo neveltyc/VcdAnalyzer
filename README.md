@@ -120,6 +120,25 @@ python vcd_analyzer.py --json info sim.vcd
 python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
 
+## Large results
+
+Results are capped at 500 rows by default; `--limit 0` lifts the cap. Where an
+unlimited result goes is up to you:
+
+- **`--output FILE`** (`-o`) writes the whole result to FILE and prints a
+  one-line receipt (lines, bytes, path; a JSON object under `--json`) — the
+  way to keep a full dump of a big waveform, or to hand one to an agent.
+- **A pipe or redirect** (`| grep`, `| less`, `> file`) streams everything.
+- **A terminal** shows the first 1 MiB and then stops with a notice: a full
+  dump of a big waveform is hundreds of MB nobody reads on screen.
+
+```bash
+python vcd_analyzer.py --limit 0 dump sim.vcd --filter 'u_dma.*' -o dma_changes.txt
+```
+
+Fully known vector values always print as `decimal (0xhex)`, at any width
+and on every Python version.
+
 ## The index sidecar (full variant)
 
 - **Explicit or automatic.** `vcd_analyzer.py index sim.vcd` builds `sim.vcd.vcidx`

@@ -97,6 +97,7 @@ import sys
 import os
 import re
 import math
+import decimal
 import json
 import argparse
 import tempfile
@@ -507,6 +508,28 @@ def fmt_time(ts, ts_sec):
 # ================================================================
 
 
+# Exact integer context for _decimal_text: no rounding at any width.
+_DECIMAL_EXACT = decimal.Context(prec=decimal.MAX_PREC, Emax=decimal.MAX_EMAX)
+
+
+def _decimal_text(n):
+    """Decimal digits of a non-negative int, whatever the interpreter allows.
+
+    str(int) refuses values beyond sys.get_int_max_str_digits() decimal
+    digits — 4300 by default on 3.11+ and on the 3.8.14+/3.9.14+/3.10.7+
+    security releases (CVE-2020-10735), none before them, and anything
+    PYTHONINTMAXSTRDIGITS says (down to 640). fmt_val used to fall back to
+    binary when it refused, so a vector's format depended on its value, the
+    Python patch level and the environment. Values below 2**2048 (at most
+    617 digits) are under every possible limit and keep the fast str();
+    wider ones go through the decimal module, which has no such limit and
+    gives the same digits everywhere.
+    """
+    if n.bit_length() <= 2048:
+        return str(n)
+    return str(_DECIMAL_EXACT.create_decimal(n))
+
+
 def fmt_val(value, info):
     """Format signal value per IEEE 1364-2005 18.2.2.
 
@@ -546,7 +569,7 @@ def fmt_val(value, info):
     try:
         d = int(value, 2)
         hw = max((width + 3) // 4, 1)
-        return f'{d} (0x{format(d, "x").zfill(hw)})'
+        return f'{_decimal_text(d)} (0x{format(d, "x").zfill(hw)})'
     except ValueError:
         return 'b' + value
 
@@ -2057,6 +2080,147 @@ def _json(obj):
         write('}\n')
         return
     print(json.dumps(obj, ensure_ascii=False, separators=(',', ':')))
+
+
+# -- where results go -----------------------------------------------------
+#
+# A query writes its result to stdout. Three destinations, three policies:
+#   * --output FILE: the whole result goes to FILE (published atomically),
+#     stdout gets a one-line receipt — the way to keep an unlimited dump.
+#   * a pipe or a redirect: everything is streamed; the caller chose where
+#     it goes (| grep, | less, > file).
+#   * an interactive terminal: output stops after _TERMINAL_BUDGET with a
+#     notice. A `--limit 0 dump` of a big dump is hundreds of MB that
+#     nobody reads on a terminal and that takes minutes to scroll past.
+
+_TERMINAL_BUDGET = 1 << 20
+
+
+class _OutputPathError(Exception):
+    """--output cannot be written (reported as a CLI error, not as an
+    unreadable VCD)."""
+
+
+class _OutputBudgetExceeded(Exception):
+    """Raised through the command when the terminal budget is spent."""
+
+
+class _TerminalBudget:
+    """stdout proxy for an interactive terminal: passes text through until
+    _TERMINAL_BUDGET characters, ends on the last whole line within it,
+    then stops the command. (print() writes a line and its newline
+    separately, so a write may hold no newline at all; the cut then falls
+    after the previous write. Only output that has no line break within the
+    whole budget — one huge JSON line — is shown cut mid-line.)"""
+
+    def __init__(self, stream, budget):
+        self._stream = stream
+        self._budget = self._left = budget
+
+    def write(self, text):
+        if len(text) <= self._left:
+            self._left -= len(text)
+            return self._stream.write(text)
+        head = text[:self._left]
+        cut = head.rfind('\n')
+        if cut >= 0:
+            self._stream.write(head[:cut + 1])
+        elif self._left == self._budget:
+            self._stream.write(head)
+        self._left = 0
+        raise _OutputBudgetExceeded()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+class _CountingSink:
+    """File proxy that counts the lines written through it."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.lines = 0
+
+    def write(self, text):
+        self.lines += text.count('\n')
+        return self._stream.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _is_terminal(stream):
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _run_command(command, vcd, args):
+    """Run a query command against the destination its output should go to."""
+    target = getattr(args, 'output_file', None)
+    if target:
+        return _run_to_file(command, vcd, args, target)
+    stdout = sys.stdout
+    if not _is_terminal(stdout):
+        return command(vcd, args)
+    sys.stdout = _TerminalBudget(stdout, _TERMINAL_BUDGET)
+    try:
+        command(vcd, args)
+    except _OutputBudgetExceeded:
+        sys.stdout = stdout
+        stdout.flush()
+        sys.stderr.write(
+            '\n>> OUTPUT CUT: {} MiB shown on the terminal. Write the whole result to a file '
+            'with --output FILE, or pipe it (| less, | grep, > file).\n'.format(
+                _TERMINAL_BUDGET >> 20))
+    finally:
+        sys.stdout = stdout
+
+
+def _run_to_file(command, vcd, args, target):
+    """Write the command's stdout to target (via a temp file in the same
+    directory, renamed on success), then print a receipt on stdout."""
+    target = os.path.abspath(target)
+    source = os.path.abspath(args.file)
+    if os.path.realpath(target) == os.path.realpath(source) or (
+            os.path.exists(target) and os.path.samefile(target, source)):
+        raise _OutputPathError('--output must not be the VCD file itself')
+    # Created like a shell redirect would (mode 0666 minus the umask), not
+    # with mkstemp's private 0600: the result is the user's file.
+    temp = '{}.{}.part'.format(target, os.getpid())
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except OSError as error:
+        raise _OutputPathError('cannot write --output {}: {}'.format(
+            target, error.strerror or error))
+    stdout = sys.stdout
+    published = False
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as sink:
+            counted = _CountingSink(sink)
+            sys.stdout = counted
+            try:
+                command(vcd, args)
+            except SystemExit as stop:
+                if stop.code not in (None, 0):
+                    raise
+            finally:
+                sys.stdout = stdout
+        os.replace(temp, target)
+        published = True
+    finally:
+        if not published:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+    size = os.path.getsize(target)
+    if getattr(args, 'json', False):
+        print(json.dumps({'output': target, 'bytes': size, 'lines': counted.lines},
+                         ensure_ascii=False, separators=(',', ':')))
+    else:
+        print('Wrote {:,} lines ({:,} bytes) to {}'.format(counted.lines, size, target))
 
 
 def _limit(args):
@@ -3765,6 +3929,13 @@ def _add_filter(sp):
                     help='comma-separated substring/glob patterns, case-insensitive')
 
 
+def _add_output(sp):
+    sp.add_argument('-o', '--output', dest='output_file', metavar='FILE', default=None,
+                    help='write the result to FILE instead of stdout (stdout gets a one-line '
+                         'receipt); use it to keep a --limit 0 result. On a terminal, stdout '
+                         'output stops after 1 MiB')
+
+
 def _add_common(sp):
     # Also accept global-style output controls after the subcommand.
     # Defaults are SUPPRESS so values supplied before the subcommand survive.
@@ -3807,29 +3978,31 @@ def main():
     _add_common(sp)
 
     sp = sub.add_parser('info', help='file overview: timescale, signal count, time span, scopes')
-    sp.add_argument('file', metavar='<file>', help='VCD file path'); _add_common(sp)
+    sp.add_argument('file', metavar='<file>', help='VCD file path'); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('list', help='list signals with path and bit width')
-    sp.add_argument('file', metavar='<file>'); _add_filter(sp); _add_common(sp)
+    sp.add_argument('file', metavar='<file>'); _add_filter(sp); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('dump', help='print value-change events in time order')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('summary', help='window stats: active/static/undefined selected signals')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('snapshot', help='known signal values at a given time point')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='TIME', required=True, help='time point, e.g. 17.55us')
-    _add_filter(sp); _add_common(sp)
+    _add_filter(sp); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('compare', help='diff known signal values between two time points')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='T1,T2', required=True, help='two time points comma-separated, e.g. 17.5us,17.7us')
-    _add_filter(sp); _add_common(sp)
+    _add_filter(sp); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('search', help='conditional search and associated signal observation')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_common(sp)
+    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_common(sp); _add_output(sp)
     sp.add_argument('--condition', metavar='COND', required=True, action='append',
                     help='comma-separated AND terms: SIG=VAL, SIG!=VAL, or changed(SIG); '
                          '!= does not match x/z/undef. Repeat the flag to OR the clauses '
@@ -3874,7 +4047,10 @@ def main():
                     sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
                 except (OSError, ValueError):
                     pass
-            cmds[args.cmd](vcd, args)
+            if args.cmd == 'index':
+                cmd_index(vcd, args)
+            else:
+                _run_command(cmds[args.cmd], vcd, args)
         finally:
             close = getattr(vcd, 'close', None)
             if close is not None:
@@ -3898,6 +4074,8 @@ def main():
     except _ConditionParseError as e:
         sys.exit('Error: ' + str(e))
     except _VCDResourceError as e:
+        sys.exit('Error: ' + str(e))
+    except _OutputPathError as e:
         sys.exit('Error: ' + str(e))
     except _FilterParseError as e:
         # Reaches here only if raised from VCDParser.match() at runtime;

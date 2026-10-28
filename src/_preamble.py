@@ -97,6 +97,7 @@ import sys
 import os
 import re
 import math
+import decimal
 import json
 import argparse
 import tempfile

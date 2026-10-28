@@ -116,6 +116,23 @@ python vcd_analyzer.py --json info sim.vcd
 python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
 
+## 大量结果
+
+结果默认最多 500 行，`--limit 0` 取消上限。无上限的结果输出到哪里由你决定：
+
+- **`--output FILE`**（`-o`）把完整结果写入 FILE，stdout 只打印一行回执（行数、
+  字节数、路径；`--json` 下为 JSON 对象）——保存大波形的完整 dump、或交给 Agent
+  读取时用它。
+- **管道或重定向**（`| grep`、`| less`、`> file`）照常全部流出。
+- **终端** 只显示前 1 MiB，然后停止并给出提示：大波形的完整 dump 动辄几百 MB，
+  在屏幕上没人看得完。
+
+```bash
+python vcd_analyzer.py --limit 0 dump sim.vcd --filter 'u_dma.*' -o dma_changes.txt
+```
+
+已知值的向量在任何宽度、任何 Python 版本下都输出为 `十进制 (0x十六进制)`。
+
 ## 索引 sidecar（完整版）
 
 - **显式或自动。** `vcd_analyzer.py index sim.vcd` 生成 `sim.vcd.vcidx`

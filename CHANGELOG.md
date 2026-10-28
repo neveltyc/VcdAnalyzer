@@ -28,6 +28,13 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 
 ### Fixed
 
+- Bit-exploded buses no longer cost O(width) Python work per tick: each bus value is a byte string updated
+  in place and decoded once per tick. On a bit-exploded 1024-bit bus changing one bit per tick, 10 MB took
+  ~8 s for `snapshot`, `compare` and `summary` and now takes ~1.8 s (both variants); `snapshot`/`compare`
+  time no longer depends on the bus width.
+- `summary` keys distinct values longer than 32 characters by (length, hash) instead of keeping the value:
+  a 1 MB dump of a bit-exploded 16384-bit bus used 612 MB and 6.5 s, now 41 MB and ~0.5 s. A hash
+  collision (~1e-10 within the 65536-value cap) would undercount `unique` by one.
 - A sidecar the usage gate rejects (declaration-heavy or tiny dumps) is turned down from its own header instead
   of after a full VCD header parse, which made every query on such a file parse the header twice (~2x slower);
   `index` now warns when it builds a sidecar queries will not use.

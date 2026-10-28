@@ -772,11 +772,14 @@ class IndexedVCD(VCDParser):
         previous=self.fold_raw(raw,sids)
         selected=set(self.signals) if sids is None else sids
         vec_width=self._vec_width
-        bit_state={gid:bits[:] for gid,bits in self._bit_state_template.items() if gid in selected}
+        # MSB-first bytearrays, as in VCDParser._iter_changes: one byte store
+        # per bit write, one C-level decode per committed bus value.
+        bit_state={gid:_bus_bytes(bits) for gid,bits in self._bit_state_template.items() if gid in selected}
+        bit_top={gid:len(state)-1 for gid,state in bit_state.items()}
         for sym,val in raw.items():
-            bit=val if len(val)==1 and _is_4state_bits(val) else 'x'
+            bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
             for gid,index in self._bit_map.get(sym,()):
-                if gid in bit_state:bit_state[gid][index]=bit
+                if gid in bit_state:bit_state[gid][bit_top[gid]-index]=bit
         # Bit-exploded buses commit once per timestamp, matching the 1.5.6
         # parser: bit writes buffer until the tick ends, so cross-bit
         # intermediates never reach the stream; a second write to the SAME
@@ -787,7 +790,7 @@ class IndexedVCD(VCDParser):
         # records themselves (a block may start mid-tick with no marker).
         bus_dirty={}
         def commit_buses():
-            out=[(gid,''.join(reversed(bit_state[gid]))) for gid in bus_dirty]
+            out=[(gid,bit_state[gid].decode('ascii')) for gid in bus_dirty]
             bus_dirty.clear()
             return out
         def emit(records,t):
@@ -811,20 +814,21 @@ class IndexedVCD(VCDParser):
                     cur_t=t
                 if t1 is not None and t>t1:stopped=True;break
                 if t<t0 or sym not in required:continue
-                bit=val if len(val)==1 and _is_4state_bits(val) else 'x'
+                bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
                 records=[]
                 for gid,index in self._bit_map.get(sym,()):
                     if gid in bit_state:
+                        pos=bit_top[gid]-index
                         written=bus_dirty.get(gid)
                         if written is None:
                             bus_dirty[gid]={index}
                         elif index in written:
-                            if bit_state[gid][index]!=bit:
-                                records.append((gid,''.join(reversed(bit_state[gid]))))
+                            if bit_state[gid][pos]!=bit:
+                                records.append((gid,bit_state[gid].decode('ascii')))
                             bus_dirty[gid]={index}
                         else:
                             written.add(index)
-                        bit_state[gid][index]=bit
+                        bit_state[gid][pos]=bit
                 if sym in selected and sym in self.signals:
                     info=self.signals[sym]
                     n=len(val);w=info['width']

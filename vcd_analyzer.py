@@ -101,9 +101,9 @@ import json
 import argparse
 import tempfile
 import time
+import hashlib
 # -- full variant only: index engine (_make.py drops this block from lite) --
 import bisect
-import hashlib
 import mmap
 import struct
 import subprocess
@@ -795,6 +795,12 @@ _SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars',
 # breaks on. Used by the t_max tail scan to find token boundaries when
 # stitching a token split across a fixed-size read.
 _ASCII_WS_BYTES = frozenset(b' \t\n\r\f\v')
+
+
+def _bus_bytes(bits):
+    """A bit-exploded bus value as a mutable MSB-first byte string, from a
+    per-bit list indexed by bit number (see _iter_changes)."""
+    return bytearray(''.join(reversed(bits)), 'ascii')
 
 
 class VCDParser:
@@ -1589,7 +1595,7 @@ class VCDParser:
 
         def _commit_buses():
             for gid in bus_dirty:
-                _record(gid, ''.join(reversed(bit_state[gid])))
+                _record(gid, bit_state[gid].decode('ascii'))
             bus_dirty.clear()
 
         def _flush():
@@ -1628,9 +1634,15 @@ class VCDParser:
         # this query. This avoids touching large unrelated bit-exploded
         # buses during catch-up scans, while preserving exact behavior for
         # selected buses and for no-filter calls.
+        #
+        # Each bus value is a bytearray of its bits, MSB first: a bit write is
+        # one byte store (at width-1-idx) and the assembled value is a single
+        # C-level decode. Joining a per-bit list instead made every tick that
+        # touched a bus cost O(width) Python-level work — on a bit-exploded
+        # 4096-bit bus changing one bit per tick that was ~75% of a snapshot.
         if sids is None:
             bit_map = self._bit_map
-            bit_state = {gid: bits[:] for gid, bits in self._bit_state_template.items()}
+            needed_gids = self._bit_state_template
         else:
             bit_map = {}
             needed_gids = set()
@@ -1640,7 +1652,8 @@ class VCDParser:
                     bit_map[sym0] = kept
                     for gid, _idx in kept:
                         needed_gids.add(gid)
-            bit_state = {gid: self._bit_state_template[gid][:] for gid in needed_gids}
+        bit_state = {gid: _bus_bytes(self._bit_state_template[gid]) for gid in needed_gids}
+        bit_top = {gid: len(state) - 1 for gid, state in bit_state.items()}
         # A synthesized bus has no previous observation until at least one of
         # its bit identifiers occurs. The template's all-x value is not an
         # observation and must not suppress a first all-x record in the window.
@@ -1710,7 +1723,7 @@ class VCDParser:
                         # in the catch-up loop would make the head scan O(width)
                         # per bit change.
                         for gid in observed_bit_buses:
-                            last_val[gid] = ''.join(reversed(bit_state[gid]))
+                            last_val[gid] = bit_state[gid].decode('ascii')
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -1756,9 +1769,9 @@ class VCDParser:
                 # every signal in dump scope.
                 if cur_t < t0:
                     if sym in bit_map:
-                        bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
+                        bit = ord(val) if len(val) == 1 and _is_4state_bits(val) else 120  # 'x'
                         for gid, idx in bit_map[sym]:
-                            bit_state[gid][idx] = bit_val
+                            bit_state[gid][bit_top[gid] - idx] = bit
                             observed_bit_buses.add(gid)
                     if sids is None or sym in sids:
                         info = signals.get(sym)
@@ -1783,19 +1796,20 @@ class VCDParser:
                 # agent would see clk as a flat line. Fall through to the
                 # standalone block so both signals update on the same value_change.
                 if sym in bit_map:
-                    bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
+                    bit = ord(val) if len(val) == 1 and _is_4state_bits(val) else 120  # 'x'
                     for gid, idx in bit_map[sym]:
+                        pos = bit_top[gid] - idx
                         if sids is None or gid in sids:
                             written = bus_dirty.get(gid)
                             if written is None:
                                 bus_dirty[gid] = {idx}
                             elif idx in written:
-                                if bit_state[gid][idx] != bit_val:
-                                    _record(gid, ''.join(reversed(bit_state[gid])))
+                                if bit_state[gid][pos] != bit:
+                                    _record(gid, bit_state[gid].decode('ascii'))
                                 bus_dirty[gid] = {idx}
                             else:
                                 written.add(idx)
-                        bit_state[gid][idx] = bit_val
+                        bit_state[gid][pos] = bit
 
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).
@@ -2736,11 +2750,14 @@ class IndexedVCD(VCDParser):
         previous=self.fold_raw(raw,sids)
         selected=set(self.signals) if sids is None else sids
         vec_width=self._vec_width
-        bit_state={gid:bits[:] for gid,bits in self._bit_state_template.items() if gid in selected}
+        # MSB-first bytearrays, as in VCDParser._iter_changes: one byte store
+        # per bit write, one C-level decode per committed bus value.
+        bit_state={gid:_bus_bytes(bits) for gid,bits in self._bit_state_template.items() if gid in selected}
+        bit_top={gid:len(state)-1 for gid,state in bit_state.items()}
         for sym,val in raw.items():
-            bit=val if len(val)==1 and _is_4state_bits(val) else 'x'
+            bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
             for gid,index in self._bit_map.get(sym,()):
-                if gid in bit_state:bit_state[gid][index]=bit
+                if gid in bit_state:bit_state[gid][bit_top[gid]-index]=bit
         # Bit-exploded buses commit once per timestamp, matching the 1.5.6
         # parser: bit writes buffer until the tick ends, so cross-bit
         # intermediates never reach the stream; a second write to the SAME
@@ -2751,7 +2768,7 @@ class IndexedVCD(VCDParser):
         # records themselves (a block may start mid-tick with no marker).
         bus_dirty={}
         def commit_buses():
-            out=[(gid,''.join(reversed(bit_state[gid]))) for gid in bus_dirty]
+            out=[(gid,bit_state[gid].decode('ascii')) for gid in bus_dirty]
             bus_dirty.clear()
             return out
         def emit(records,t):
@@ -2775,20 +2792,21 @@ class IndexedVCD(VCDParser):
                     cur_t=t
                 if t1 is not None and t>t1:stopped=True;break
                 if t<t0 or sym not in required:continue
-                bit=val if len(val)==1 and _is_4state_bits(val) else 'x'
+                bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
                 records=[]
                 for gid,index in self._bit_map.get(sym,()):
                     if gid in bit_state:
+                        pos=bit_top[gid]-index
                         written=bus_dirty.get(gid)
                         if written is None:
                             bus_dirty[gid]={index}
                         elif index in written:
-                            if bit_state[gid][index]!=bit:
-                                records.append((gid,''.join(reversed(bit_state[gid]))))
+                            if bit_state[gid][pos]!=bit:
+                                records.append((gid,bit_state[gid].decode('ascii')))
                             bus_dirty[gid]={index}
                         else:
                             written.add(index)
-                        bit_state[gid][index]=bit
+                        bit_state[gid][pos]=bit
                 if sym in selected and sym in self.signals:
                     info=self.signals[sym]
                     n=len(val);w=info['width']
@@ -4183,6 +4201,22 @@ def _transition_groups(vcd, t0, t1, sids):
 # Part 7: Window summary
 # ================================================================
 
+def _unique_key(val):
+    """Distinct-value key for summary's `unique` count. Values up to 32
+    characters are kept as-is; longer ones (wide buses) by (length, hash),
+    so each set entry stays small instead of holding the value: a
+    bit-exploded 16384-bit bus with a fresh value every tick otherwise kept
+    ~600 MB of strings alive for a 1 MB file. hash() is the string hash the
+    set would compute anyway (no extra pass over the value, unlike a
+    cryptographic digest, which cost ~5 us per 8 KiB value per tick). A
+    collision among the at most VCD_ANALYZER_MAX_UNIQUE_VALUES keys is
+    ~1e-10 likely and would undercount by one; a tuple never equals a
+    short value (str)."""
+    if len(val) <= 32:
+        return val
+    return len(val), hash(val)
+
+
 def _summary_rows(vcd, t0, t1, sids):
     """Return (rows, undefined, counts) for window summary.
 
@@ -4230,7 +4264,7 @@ def _summary_rows(vcd, t0, t1, sids):
         return {
             'changes': 0, 'first_at': None, 'last_at': None,
             'initial': init_val, 'last': init_val,
-            'unique': {init_val} if init_val is not None else set(),
+            'unique': {_unique_key(init_val)} if init_val is not None else set(),
             'unique_capped': False,
             'rise_count': 0 if is_scalar else None,
             'fall_count': 0 if is_scalar else None,
@@ -4278,9 +4312,10 @@ def _summary_rows(vcd, t0, t1, sids):
             # Once capped the set is frozen, so skip the per-value hash
             # entirely — this is the exact tens-of-millions hot path the cap
             # exists for.
-            if not s['unique_capped'] and val not in s['unique']:
+            key = None if s['unique_capped'] else _unique_key(val)
+            if key is not None and key not in s['unique']:
                 if len(s['unique']) < unique_cap:
-                    s['unique'].add(val)
+                    s['unique'].add(key)
                 else:
                     # At cap: the count stays a lower bound, flagged on the row.
                     s['unique_capped'] = True

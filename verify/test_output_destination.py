@@ -91,6 +91,12 @@ def test_output_errors_leave_nothing_behind(tmp_path):
     same = run_cli(['dump', str(src), '-o', str(src)])
     assert same.returncode != 0 and 'must not be the VCD file itself' in same.stderr
     assert src.read_bytes() == FIXTURE.read_bytes()
+    folder = tmp_path / 'folder'
+    folder.mkdir()
+    into_dir = run_cli(['info', str(src), '-o', str(folder)])
+    assert into_dir.returncode != 0
+    assert 'cannot write --output {}: it is a directory'.format(folder) in into_dir.stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['copy.vcd', 'folder']
 
 
 # ---- terminal budget --------------------------------------------------------
@@ -112,7 +118,9 @@ def test_terminal_output_stops_after_budget(monkeypatch):
     errors = io.StringIO()
     monkeypatch.setattr(sys, 'stdout', terminal)
     monkeypatch.setattr(sys, 'stderr', errors)
-    va._run_command(_flood(40000), None, argparse_ns())  # ~2.9 MB of text
+    with pytest.raises(SystemExit) as stop:
+        va._run_command(_flood(40000), None, argparse_ns())  # ~2.9 MB of text
+    assert stop.value.code == 3  # a cut result is not a complete one
     shown = terminal.getvalue()
     assert va._TERMINAL_BUDGET - 100 < len(shown) <= va._TERMINAL_BUDGET
     assert shown.endswith('\n') and shown.splitlines()[-1].startswith('line ')

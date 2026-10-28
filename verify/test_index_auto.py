@@ -233,3 +233,44 @@ def test_gate_file_loads_native_last(tmp_path, monkeypatch):
                         lambda: called.append(1) or real())
     va.maybe_auto_build(va.VCDParser(str(src)), str(src))
     assert called, 'gate-passing file never reached the native loader'
+
+
+def test_stale_sidecar_below_floor_is_rebuilt(tmp_path):
+    """A sidecar 1.6.0 auto-built for a small file has no fingerprint; it is
+    stale, and is rebuilt even though the file is below the floor for NEW
+    automatic sidecars (otherwise every query would warn forever)."""
+    _clear_autobuild_state()
+    src = _big_vcd(tmp_path)
+    _settled(src)
+    sidecar = va.sidecar_path(src)
+    va.build_index(src, sidecar, 64)
+    with open(sidecar, 'r+b') as f:
+        f.truncate(os.path.getsize(sidecar) - va.FOOTER.size)  # 1.6.0 layout
+    assert os.path.getsize(src) < va._AUTO_INDEX_MIN_BYTES
+    snap = _run_cli(['--json', 'snapshot', str(src), '--at', '1'])
+    assert snap.returncode == 0, snap.stderr
+    assert 'building index in the background' in snap.stderr
+    for _ in range(100):
+        if va._sidecar_fresh(src, sidecar):
+            break
+        time.sleep(0.1)
+    assert va._sidecar_fresh(src, sidecar)
+
+
+def test_busy_background_build_keeps_failure_log(tmp_path):
+    """A background builder that loses the lock race built nothing: it must
+    not clear the log an earlier failed build left."""
+    src = _big_vcd(tmp_path)
+    _settled(src)
+    sidecar = va.sidecar_path(src)
+    log = Path(sidecar + '.log')
+    log.write_text('earlier failure\n', encoding='utf-8')
+    fd = va._acquire_build_lock(sidecar)
+    assert fd is not None
+    try:
+        busy = _run_cli(['index', str(src), '--auto'])
+    finally:
+        os.close(fd)
+    assert busy.returncode == 0, busy.stderr
+    assert log.read_text(encoding='utf-8') == 'earlier failure\n'
+    assert not os.path.exists(sidecar)

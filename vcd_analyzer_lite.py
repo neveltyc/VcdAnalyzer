@@ -2094,6 +2094,7 @@ def _json(obj):
 #     nobody reads on a terminal and that takes minutes to scroll past.
 
 _TERMINAL_BUDGET = 1 << 20
+_EXIT_OUTPUT_CUT = 3
 
 
 class _OutputPathError(Exception):
@@ -2149,6 +2150,13 @@ class _CountingSink:
         return getattr(self._stream, name)
 
 
+def _same_file(path, other):
+    """True when path names the same file as other (also via links)."""
+    return (os.path.realpath(path) == os.path.realpath(other)
+            or (os.path.exists(path) and os.path.exists(other)
+                and os.path.samefile(path, other)))
+
+
 def _is_terminal(stream):
     try:
         return stream.isatty()
@@ -2174,6 +2182,9 @@ def _run_command(command, vcd, args):
             '\n>> OUTPUT CUT: {} MiB shown on the terminal. Write the whole result to a file '
             'with --output FILE, or pipe it (| less, | grep, > file).\n'.format(
                 _TERMINAL_BUDGET >> 20))
+        # A distinct status, so a script driving a pseudo-terminal can tell
+        # a cut result (possibly a half JSON document) from a complete one.
+        sys.exit(_EXIT_OUTPUT_CUT)
     finally:
         sys.stdout = stdout
 
@@ -2182,10 +2193,10 @@ def _run_to_file(command, vcd, args, target):
     """Write the command's stdout to target (via a temp file in the same
     directory, renamed on success), then print a receipt on stdout."""
     target = os.path.abspath(target)
-    source = os.path.abspath(args.file)
-    if os.path.realpath(target) == os.path.realpath(source) or (
-            os.path.exists(target) and os.path.samefile(target, source)):
+    if _same_file(target, args.file):
         raise _OutputPathError('--output must not be the VCD file itself')
+    if os.path.isdir(target):
+        raise _OutputPathError('cannot write --output {}: it is a directory'.format(target))
     # Created like a shell redirect would (mode 0666 minus the umask), not
     # with mkstemp's private 0600: the result is the user's file.
     temp = '{}.{}.part'.format(target, os.getpid())
@@ -2207,7 +2218,11 @@ def _run_to_file(command, vcd, args, target):
                     raise
             finally:
                 sys.stdout = stdout
-        os.replace(temp, target)
+        try:
+            os.replace(temp, target)
+        except OSError as error:
+            raise _OutputPathError('cannot write --output {}: {}'.format(
+                target, error.strerror or error))
         published = True
     finally:
         if not published:

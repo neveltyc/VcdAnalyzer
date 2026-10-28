@@ -251,9 +251,14 @@ def raw_symbols(parser):
 # (doubling the block size) only while the sidecar would exceed
 # index_budget(): typical dumps keep 1 MiB blocks at ~0.2% of the source;
 # wide designs with thousands of signals active in every block coarsen until
-# they fit (a 20k-signal dump stops at 8 MiB, 1.6%). An explicit block size
+# they fit (a 20k-signal dump stops at 8 MiB, 1.6%). Coarsening stops at
+# AUTO_MAX_BLOCK_BYTES, the fixed size 1.6.0 used, even over budget: past it
+# a point query re-parses so much that the index loses to a plain scan (a
+# 60k-signal dump whose directory alone exceeds the budget once merged down
+# to a single block and ran 4x slower than no index). An explicit block size
 # (`index --block-mib`) is used as given.
 AUTO_BLOCK_BYTES = 1 << 20
+AUTO_MAX_BLOCK_BYTES = 8 << 20
 
 
 def index_budget(source_bytes):
@@ -261,8 +266,13 @@ def index_budget(source_bytes):
     return max(source_bytes // 50, 256 << 10)
 
 
-def _sidecar_bytes(nblocks, nsymbols, pairs, entry_bytes):
-    """Size of a sidecar layout, fingerprint footer included."""
+def _sidecar_bytes(nblocks, nsymbols, pairs):
+    """Size of a sidecar layout as the budget sees it, fingerprint footer
+    included. Postings are counted at the native builder's encoding (6
+    bytes while block ids fit u16, else 8) for both builders, so they pick
+    the same block size; the pure-Python builder's own 8-byte postings may
+    land slightly over the budget."""
+    entry_bytes = 6 if nblocks <= 65535 else 8
     return (HEADER.size + BLOCK.size * nblocks + DIRECTORY.size * nsymbols
             + entry_bytes * pairs + FOOTER.size)
 
@@ -278,10 +288,12 @@ def _merge_block_pairs(blocks):
     return merged
 
 
-def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=None):
+def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=None,
+                max_block_bytes=None):
     """Pure-Python builder (the reference the native one mirrors). With
     max_index_bytes, neighbouring blocks are merged pairwise while the
-    sidecar would exceed it, as the native builder does."""
+    sidecar would exceed it and the doubled block size stays within
+    max_block_bytes (None: no cap), as the native builder does."""
     start_clock = time.perf_counter()
     parser = VCDParser(str(path))
     symbols = raw_symbols(parser)
@@ -326,8 +338,8 @@ def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=Non
     pairs = sum(len(b) for b in bids)
     coarsens = 0
     while (max_index_bytes is not None and len(blocks) > 1
-           and _sidecar_bytes(len(blocks), len(symbols), pairs, POSTING.size)
-           > max_index_bytes):
+           and (max_block_bytes is None or block_bytes << (coarsens + 1) <= max_block_bytes)
+           and _sidecar_bytes(len(blocks), len(symbols), pairs) > max_index_bytes):
         merged = _merge_block_pairs(blocks)
         if merged is None:
             break
@@ -392,7 +404,7 @@ def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=Non
         'source_bytes': stat_after.st_size,
         'index_bytes': os.path.getsize(sidecar), 'blocks': len(blocks),
         'raw_symbols': len(symbols), 'signal_block_pairs': pairs,
-        'block_bytes': block_bytes, 'coarsens': coarsens,
+        'block_bytes': block_bytes, 'coarsens': coarsens, 'data_start': start,
         'max_block_bytes': max((b[1] - b[0] for b in blocks), default=0),
     }
 
@@ -716,15 +728,16 @@ class IndexedVCD(VCDParser):
                         val=_clamp_overwide_logic_value(val,info)
                     state[sid]=val
                 continue
-            bits=self._bit_state_template[sid][:]
+            bits=_bus_bytes(self._bit_state_template[sid])
+            top=len(bits)-1
             observed=False
             for sym in self.sources[sid]:
                 if sym in raw:
                     value=raw[sym]
-                    bit=value if len(value)==1 and _is_4state_bits(value) else 'x'
+                    bit=ord(value) if len(value)==1 and _is_4state_bits(value) else 120  # 'x'
                     for gid,index in self._bit_map[sym]:
-                        if gid==sid:bits[index]=bit;observed=True
-            if observed:state[sid]=''.join(reversed(bits))
+                        if gid==sid:bits[top-index]=bit;observed=True
+            if observed:state[sid]=bits.decode('ascii')
         return state
     def state_at(self,t_at,sids=None,pointers=True):
         if self._gate_rejects():
@@ -850,7 +863,8 @@ def sidecar_path(vcd_path):
     return str(vcd_path) + '.vcidx'
 
 
-def native_index_build(path, sidecar, block_bytes, max_index_bytes=None):
+def native_index_build(path, sidecar, block_bytes, max_index_bytes=None,
+                       max_block_bytes=None):
     """Build via the embedded native library (full variant only).
 
     Fully automatic: the pure-Python builder is the fallback for every
@@ -863,7 +877,8 @@ def native_index_build(path, sidecar, block_bytes, max_index_bytes=None):
         return None
     built = '{}.native.{}'.format(sidecar, os.getpid())
     try:
-        stats = build(path, built, block_bytes, max_index_bytes or 0)
+        stats = build(path, built, block_bytes, max_index_bytes or 0,
+                      max_block_bytes or 0)
         if stats is None:
             return None
         _seal_sidecar(path, built, sidecar)
@@ -884,12 +899,13 @@ def build_index_best(path, sidecar, block_bytes=None, threads=None):
         raise ValueError('simulated index failure (VCD_ANALYZER_FAIL_INDEX)')
     if threads is not None:
         os.environ['VCD_ANALYZER_INDEX_THREADS'] = str(threads)
-    budget = None
+    budget = cap = None
     if block_bytes is None:
         block_bytes = AUTO_BLOCK_BYTES
         budget = index_budget(os.path.getsize(path))
+        cap = AUTO_MAX_BLOCK_BYTES
     try:
-        stats = native_index_build(path, sidecar, block_bytes, budget)
+        stats = native_index_build(path, sidecar, block_bytes, budget, cap)
     except ValueError as error:
         # The native builder is ASCII-only and refuses some exotic tokens;
         # and build-fatal conditions (non-monotonic timestamps) re-raise
@@ -905,7 +921,7 @@ def build_index_best(path, sidecar, block_bytes=None, threads=None):
         # the native builder, so say so instead of silently ignoring it.
         _warn('VCD_ANALYZER_INDEX_THREADS is ignored: no native builder '
               'is available on this platform', cat='index_threads_hint')
-    stats = build_index(path, sidecar, block_bytes, budget)
+    stats = build_index(path, sidecar, block_bytes, budget, cap)
     stats['builder'] = 'python'
     return stats
 
@@ -1096,8 +1112,10 @@ def maybe_auto_build(parser, vcd_path):
     lock) is reported and left alone. Never blocks or fails the query.
 
     Checks are ordered cheapest-first: a query already served by the index
-    needs nothing, a file below _AUTO_INDEX_MIN_BYTES is never built
-    automatically (one stat), a fresh sidecar needs nothing, a running
+    needs nothing, a file below _AUTO_INDEX_MIN_BYTES gets no NEW sidecar
+    (one stat; an existing stale one is still rebuilt — 1.6.0 auto-built
+    sidecars down to 128 KiB, and they lack the fingerprint now required),
+    a fresh sidecar needs nothing, a running
     builder or a live writer needs no native library — the
     base85+lzma+dlopen load happens only right before the spawn.
 
@@ -1111,14 +1129,16 @@ def maybe_auto_build(parser, vcd_path):
     if _AUTO_SCRIPT_PATH is None:
         return  # imported as a library: no script to respawn
     vcd_path = os.path.abspath(vcd_path)
-    try:
-        if os.path.getsize(vcd_path) < _AUTO_INDEX_MIN_BYTES:
-            return
-    except OSError:
-        return
     sidecar = sidecar_path(vcd_path)
-    if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
-        return
+    if os.path.exists(sidecar):
+        if _sidecar_fresh(vcd_path, sidecar):
+            return
+    else:
+        try:
+            if os.path.getsize(vcd_path) < _AUTO_INDEX_MIN_BYTES:
+                return
+        except OSError:
+            return
     if _build_in_progress(sidecar):
         return  # a builder is already running for this file
     try:
@@ -1162,6 +1182,10 @@ def maybe_auto_build(parser, vcd_path):
 # native builder would have been much faster.
 _SLOW_BUILD_NOTE_BYTES = 64 << 20
 
+# Returned by a background (--auto) build that found another builder
+# holding the lock: nothing was built, so nothing is logged or cleared.
+_BUILD_BUSY = object()
+
 
 def _build_index_command(vcd, args):
     """Build the optional .vcidx sidecar for fast random access.
@@ -1184,11 +1208,7 @@ def _build_index_command(vcd, args):
                      '(e.g. --output {}{})'.format(target, '.vcidx'))
         # --output pointing at the input VCD would REPLACE the waveform
         # with the sidecar at publication; --force must not bypass this.
-        same = (os.path.realpath(target) == os.path.realpath(args.file)
-                or (os.path.exists(target)
-                    and os.path.exists(args.file)
-                    and os.path.samefile(target, args.file)))
-        if same:
+        if _same_file(target, args.file):
             sys.exit('Error: --output must not be the VCD file itself')
     auto = bool(getattr(args, 'auto', False))
     lock_fd = None
@@ -1197,7 +1217,7 @@ def _build_index_command(vcd, args):
         # A lost race (another builder grabbed it) exits quietly.
         lock_fd = _acquire_build_lock(sidecar)
         if lock_fd is None:
-            sys.exit(0)
+            return _BUILD_BUSY
     try:
         if os.path.exists(target) and not (args.force or auto):
             sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
@@ -1215,8 +1235,10 @@ def _build_index_command(vcd, args):
         if lock_fd is not None:
             os.close(lock_fd)  # releases the OS lock; the file is kept
     builder = stats.get('builder', 'python')
-    if not _index_pays_off(stats['source_bytes'] - data_start(args.file),
-                           stats['raw_symbols']):
+    start = stats.get('data_start')
+    if start is None:
+        start = data_start(args.file)
+    if not _index_pays_off(stats['source_bytes'] - start, stats['raw_symbols']):
         _warn('{}: queries will not use this index — the file is too small or '
               'too declaration-heavy for one to pay off (a plain scan is '
               'faster)'.format(args.file), cat='index_gate')
@@ -1272,7 +1294,9 @@ def cmd_index(vcd, args):
     sys.stderr = captured
     failure = None
     try:
-        _build_index_command(vcd, args)
+        if _build_index_command(vcd, args) is _BUILD_BUSY:
+            sys.stderr = stderr
+            return  # another builder owns the build (and its log)
     except SystemExit as stop:
         if stop.code not in (None, 0):
             failure = stop.code if isinstance(stop.code, str) \

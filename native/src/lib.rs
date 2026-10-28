@@ -16,6 +16,7 @@
 //   data_start <u64>
 //   block_bytes <u64>
 //   budget_bytes <u64>          (0 = none; see "index budget" below)
+//   max_block_bytes <u64>       (0 = no cap on budget coarsening)
 //   max_token_len <usize>
 //   symbols <count>
 //   <symbol id code>            (one per line, raw_symbols() order)
@@ -649,6 +650,7 @@ pub fn build_from_manifest(
     let data_start = next_num("data_start")?;
     let block_bytes = next_num("block_bytes")?;
     let budget_bytes = next_num("budget_bytes")?;
+    let max_block_bytes_cap = next_num("max_block_bytes")?;
     let max_token_len = next_num("max_token_len")? as usize;
     let sym_count = next_num("symbols")? as usize;
     if block_bytes == 0 || block_bytes > (4096u64 << 20) {
@@ -829,16 +831,21 @@ pub fn build_from_manifest(
     // Builds start fine (a point query parses its block from the start, so
     // small blocks keep queries cheap) and merge neighbouring blocks pairwise
     // — doubling the block size — while the sidecar would exceed
-    // budget_bytes; 0 means no budget. Same policy as the Python builder's
-    // max_index_bytes: wide designs with many signals active in every block
-    // coarsen, everything else keeps the requested size.
+    // budget_bytes (0: no budget) and the doubled size stays within
+    // max_block_bytes_cap (0: no cap). Same policy and size model as the
+    // Python builder's max_index_bytes/max_block_bytes: wide designs with
+    // many signals active in every block coarsen, everything else keeps the
+    // requested size; the cap keeps a directory-dominated index from
+    // merging down to a single block.
     let mut block_bytes = block_bytes;
     let mut coarsens: u32 = 0;
     let sidecar_bytes = |nb: usize, pairs: u64| -> u64 {
         let entry: u64 = if nb <= 65535 { 6 } else { 8 };
         56 + 32 * nb as u64 + 16 * symbols.len() as u64 + entry * pairs + FOOTER_BYTES
     };
-    while budget_bytes > 0 && blocks.len() > 1 {
+    while budget_bytes > 0 && blocks.len() > 1
+        && (max_block_bytes_cap == 0 || block_bytes.saturating_mul(2) <= max_block_bytes_cap)
+    {
         let pairs: u64 = postings.iter().map(|p| p.len() as u64).sum();
         if sidecar_bytes(blocks.len(), pairs) <= budget_bytes {
             break;

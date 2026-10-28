@@ -276,7 +276,7 @@ def _load_native_library():
         return None
 
 
-def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0):
+def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0, max_block_bytes=0):
     """Build the sidecar natively. None when no usable library (the caller
     falls back to the pure-Python builder); ValueError for fatal build
     errors (non-monotonic timestamps, changed source) so they surface
@@ -287,9 +287,10 @@ def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0):
     started = time.perf_counter()
     parser = VCDParser(str(path))
     symbols = raw_symbols(parser)
-    manifest = ('data_start {}\\nblock_bytes {}\\nbudget_bytes {}\\nmax_token_len {}\\n'
-                'symbols {}\\n{}\\n').format(
-        data_start(path), block_bytes, budget_bytes, MAX_DATA_TOKEN_LEN,
+    start = data_start(path)
+    manifest = ('data_start {}\\nblock_bytes {}\\nbudget_bytes {}\\nmax_block_bytes {}\\n'
+                'max_token_len {}\\nsymbols {}\\n{}\\n').format(
+        start, block_bytes, budget_bytes, max_block_bytes, MAX_DATA_TOKEN_LEN,
         len(symbols), '\\n'.join(symbols)).encode('utf-8')
     err = ctypes.create_string_buffer(512)
     stats_buf = ctypes.create_string_buffer(8192)
@@ -301,6 +302,7 @@ def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0):
                          or 'native builder failed')
     stats = json.loads(stats_buf.value.decode('utf-8'))
     stats['build_s'] = time.perf_counter() - started
+    stats['data_start'] = start
     stats['directory_bytes'] = (56 + 32 * stats['blocks']
                                 + 16 * stats['raw_symbols'])
     return stats

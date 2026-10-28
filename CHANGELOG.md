@@ -7,7 +7,7 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 
 ### Changed
 
-- Automatic background index builds start only for sources of 50 MiB or more (was 128 KiB): below that a plain
+- Automatic background index builds start only for sources of 10 MiB or more (was 128 KiB): below that a plain
   scan answers in seconds and a query never writes next to the dump. `index` still builds at any size.
 - The index block size is automatic (was a fixed 8 MiB): builds start at 1 MiB blocks and merge neighbouring
   blocks only while the sidecar would exceed 2% of the source. Indexed point queries drop from ~0.6-1.2 s to
@@ -28,6 +28,9 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 
 ### Fixed
 
+- A sidecar the usage gate rejects (declaration-heavy or tiny dumps) is turned down from its own header instead
+  of after a full VCD header parse, which made every query on such a file parse the header twice (~2x slower);
+  `index` now warns when it builds a sidecar queries will not use.
 - `vcd_analyzer_lite.py index --auto` crashed with a NameError, and `index` with an existing sidecar answered
   "already exists" instead of pointing to the full build.
 

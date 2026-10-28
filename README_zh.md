@@ -120,7 +120,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 - **显式或自动。** `vcd_analyzer.py index sim.vcd` 生成 `sim.vcd.vcidx`
   （约为源文件的百分之一都不到；10GB 级 dump 只需几秒）。也可以什么都不做：
-  对 50 MiB 及以上、尚未索引的文件，第一次查询会自动在后台构建，下一次查询
+  对 10 MiB 及以上、尚未索引的文件，第一次查询会自动在后台构建，下一次查询
   就快了。更小的文件不会被自动处理（纯扫描几秒内就能回答）；需要时可用
   `index` 对任意大小的文件显式构建。
   `--output PATH` 可存到别处（PATH 必须以 `.vcidx` 结尾）并软链接回

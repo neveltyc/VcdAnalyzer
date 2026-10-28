@@ -233,6 +233,29 @@ def test_index_command_reports_block_size(tmp_path):
     assert 'x 2 MiB' in text.stdout and '(automatic)' not in text.stdout
 
 
+def test_gate_rejected_sidecar_skips_header_parse(tmp_path, monkeypatch):
+    """A sidecar the usage gate rejects is turned down from its own header,
+    before IndexedVCD parses the VCD header (which main() would then parse
+    a second time for the plain parser)."""
+    src = tmp_path / 'small.vcd'
+    src.write_text('$timescale 1ns $end $scope module top $end $var wire 1 ! a $end '
+                   '$upscope $end $enddefinitions $end #0 0! #5 1!')
+    va.build_index(src, va.sidecar_path(src), 64)
+    def refuse(*_a, **_k):
+        raise AssertionError('IndexedVCD built for a gate-rejected sidecar')
+    monkeypatch.setattr(va, 'IndexedVCD', refuse)
+    assert va.try_index(src) is None
+
+
+def test_index_command_warns_when_gate_rejects(tmp_path):
+    src = tmp_path / 'small.vcd'
+    src.write_text('$timescale 1ns $end $scope module top $end $var wire 1 ! a $end '
+                   '$upscope $end $enddefinitions $end #0 0! #5 1!')
+    result = run_cli(['index', str(src)])
+    assert result.returncode == 0, result.stderr
+    assert 'queries will not use this index' in result.stderr
+
+
 def test_malformed_timestamp_is_not_a_bus_commit(tmp_path):
     """'#1.5' between bit writes must not flush the bus early: the
     reference parser skips malformed timestamps entirely (P1-2)."""

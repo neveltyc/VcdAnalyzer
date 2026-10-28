@@ -2007,6 +2007,11 @@ FINGERPRINT_SAMPLES = 8
 FINGERPRINT_SAMPLE_BYTES = 4096
 
 
+def _index_pays_off(data_bytes, raw_symbols):
+    """The per-file usage gate (see IndexedVCD.index_advisable)."""
+    return data_bytes >= 128 << 10 and data_bytes >= 64 * raw_symbols
+
+
 class _CorruptSidecarError(RuntimeError):
     """The sidecar failed an on-demand integrity check (e.g. a posting
     names a block beyond the table). Callers fall back to the plain
@@ -2462,7 +2467,7 @@ class IndexedVCD(VCDParser):
         """
         if self._advisable is None:
             data=self.file_size-self.begin_offset
-            self._advisable=(data>=128<<10 and data>=64*len(self.raw_id))
+            self._advisable=_index_pays_off(data,len(self.raw_id))
         return self._advisable
     def _gate_rejects(self):
         return self._enforce_gate and not self.index_advisable()
@@ -2881,6 +2886,18 @@ def try_index(vcd_path):
     sidecar = sidecar_path(vcd_path)
     if not os.path.exists(sidecar):
         return None
+    # The gate needs only the sidecar header (source size, data start, raw
+    # symbol count): decide it BEFORE IndexedVCD parses the VCD header, or
+    # a header-heavy file the gate rejects pays for that parse twice.
+    try:
+        with open(sidecar, 'rb') as f:
+            head = f.read(HEADER.size)
+        magic, size, _mtime, _bb, _nb, nsym, begin = HEADER.unpack(head)
+    except (OSError, struct.error):
+        pass  # unreadable or truncated: IndexedVCD below reports it
+    else:
+        if magic in (MAGIC, MAGIC2) and not _index_pays_off(size - begin, nsym):
+            return None
     try:
         idx = IndexedVCD(vcd_path, sidecar)
     except (ValueError, OSError, struct.error, KeyError) as error:
@@ -2899,10 +2916,12 @@ _AUTO_SCRIPT_PATH = None  # set by main(): the running single-file script
 
 # Smallest source a query builds an index for in the background. With 1 MiB
 # blocks an indexed point query takes ~0.1-0.3 s at any size, while a plain
-# scan grows with the queried time (~0.9 s at the end of 10 MB, ~4 s at the
-# end of 50 MB). Smaller files are left untouched (nothing is written next
-# to them); `index` still builds one on request at any size.
-_AUTO_INDEX_MIN_BYTES = 50 << 20
+# scan grows with the queried time: ~0.9 s at the end of a typical 10 MB
+# dump, up to ~8 s on a pathological one (a bit-exploded 1024-bit bus); a
+# native build of 10 MB takes well under 0.1 s. Smaller files are left
+# untouched (nothing is written next to them); `index` still builds one on
+# request at any size.
+_AUTO_INDEX_MIN_BYTES = 10 << 20
 
 
 def _sidecar_fresh(vcd_path, sidecar):
@@ -3067,7 +3086,7 @@ def maybe_auto_build(parser, vcd_path):
         data = os.path.getsize(vcd_path) - data_start(vcd_path)
     except (OSError, _VCDResourceError):
         return
-    if not (data >= 128 << 10 and data >= 64 * len(symbols)):
+    if not _index_pays_off(data, len(symbols)):
         return  # the gate would refuse it; do not build what we won't use
     held = _writer_holds(vcd_path)
     if held:
@@ -3156,6 +3175,11 @@ def _build_index_command(vcd, args):
         if lock_fd is not None:
             os.close(lock_fd)  # releases the OS lock; the file is kept
     builder = stats.get('builder', 'python')
+    if not _index_pays_off(stats['source_bytes'] - data_start(args.file),
+                           stats['raw_symbols']):
+        _warn('{}: queries will not use this index — the file is too small or '
+              'too declaration-heavy for one to pay off (a plain scan is '
+              'faster)'.format(args.file), cat='index_gate')
     r = {'file': args.file, 'sidecar': sidecar,
          'builder': builder,
          'build_s': round(stats.get('build_s', 0.0), 3),

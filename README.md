@@ -124,7 +124,7 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 - **Explicit or automatic.** `vcd_analyzer.py index sim.vcd` builds `sim.vcd.vcidx`
   (a fraction of a percent of the source; seconds for a 10 GB dump). Or do
-  nothing: the first query on an unindexed dump of 50 MiB or more starts a
+  nothing: the first query on an unindexed dump of 10 MiB or more starts a
   background build — the next query is fast. Smaller files are never touched
   automatically (a plain scan answers them in seconds); `index` builds one
   for any size on request.

@@ -1,9 +1,12 @@
 # Guarantees per push/PR:
-#   1. both release files match src/ (lite byte-exactly; full by exact
-#      src/-derived head/tail plus a structural check of the embedded
-#      native part — the blobs need the Rust toolchain, so they are
-#      checked structurally)
-#   2. the full suite passes on the oldest (3.8) and newest supported
+#   1. both release files match src/ byte-exactly (the full file around its
+#      embedded native libraries, each of which must match its recorded
+#      sha256)
+#   2. the embedded native libraries are byte-identical to a fresh build of
+#      native/ with the pinned toolchain, except the macOS dylib's per-build
+#      LC_UUID and code signature (`native` job; its `native-dist` artifact
+#      is the build to embed after changing native/)
+#   3. the full suite passes on the oldest (3.8) and newest supported
 #      Python of each release-critical platform, Windows included: the
 #      full variant's embedded native builder is exercised for real on
 #      every matrix leg that has a matching library
@@ -32,6 +35,28 @@ jobs:
       - name: Release files match src/
         run: python _make.py --check
       - name: Install pytest
-        run: pip install pytest
+        run: pip install pytest pytest-xdist
       - name: Tests
-        run: python -m pytest verify/ -q
+        run: python -m pytest verify/ -q -n auto
+
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install the pinned toolchain
+        # Versions must match native/rust-toolchain.toml and build_all.sh.
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal \
+            -t aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu,x86_64-pc-windows-gnu,aarch64-apple-darwin
+          pip install ziglang==0.16.0 cargo-zigbuild==0.24.0
+      - name: Build native/dist
+        run: sh native/build_all.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-dist
+          path: native/dist/
+      - name: Embedded libraries match this build
+        run: python _make.py --check-native native/dist

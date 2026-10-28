@@ -14,8 +14,8 @@ All commands support `--json` for structured output. **Always use `--json` when 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.0
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.1
 ```
 
 No pip install, no virtualenv, no dependencies. Python 3.8+. (A
@@ -58,6 +58,7 @@ User wants to know...
 |---|---|
 | `--json` | **Always use this.** Compact JSON to stdout. |
 | `--limit N` | Max results. Default 500. `--limit 0` = unlimited. |
+| `-o FILE`, `--output FILE` | Write the result to FILE; stdout gets a one-line receipt (`{"output","bytes","lines"}` under `--json`). Use with `--limit 0`. |
 | `--verbose` | Extra fields (width, type, raw values). Disables default limit. |
 
 ### Time argument format
@@ -140,17 +141,21 @@ Key JSON fields: `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`. Only signals 
 ### 7. index — build the acceleration sidecar (full variant)
 
 ```bash
-python3 vcd_analyzer.py index <file> [--block-mib 8] [--force] [--output PATH]
+python3 vcd_analyzer.py index <file> [--block-mib N] [--force] [--output PATH]
 ```
 
 Builds `<file>.vcidx`. Every query command then uses it automatically when
 fresh — output unchanged, big-dump point queries become sub-second. If you
-never run it, the first query on a big file starts a background build by
-itself (`VCD_ANALYZER_AUTO_INDEX=0` disables; on platforms without an
+never run it, the first query on a file of 10 MiB or more starts a
+background build by itself (`VCD_ANALYZER_AUTO_INDEX=0` disables; on platforms without an
 embedded native builder automatic builds are off by default — run `index`
 explicitly, which reports the slower pure-Python mechanism). Rebuild is
-skipped with a message while the dump still looks open for writing. Key JSON fields:
-`builder`, `index_bytes`, `blocks`, `build_s`.
+skipped with a message while the dump still looks open for writing. A sidecar
+whose source changed (size, mtime or sampled content) is ignored and rebuilt.
+A failed background build leaves `<file>.vcidx.log`. Key JSON fields:
+`builder`, `index_bytes`, `blocks`, `block_bytes`, `build_s`. Leave `--block-mib` unset:
+the block size is chosen automatically (1 MiB, larger — up to 8 MiB — only when
+the index would exceed 2% of the dump).
 
 ### 8. search — condition-based query (three modes)
 
@@ -302,6 +307,14 @@ python3 vcd_analyzer.py info sim.vcd --json
 Default `--limit` is 500 results. If `truncated: true` appears in JSON output, there are more results, and a `hint` field spells out what to do about it. Use `--limit 0` for unlimited, or increase the limit. The `total_is_exact` field tells you whether `total` is the true count or a lower bound (streaming commands stop counting after the first unshown result). In text mode a clipped result ends with a `>> TRUNCATED: ...` line.
 
 Unlimited `dump` JSON and `search` output spool result rows to temporary files; sufficient temporary disk space is required.
+
+**Never read an unlimited result into your context.** With `--limit 0`, write it to a file and inspect it with `grep`/`head`:
+
+```bash
+python3 vcd_analyzer.py --json --limit 0 dump sim.vcd --filter 'u_dma.*' -o /tmp/dma.json
+```
+
+A terminal shows at most 1 MiB of output (then `>> OUTPUT CUT` and exit status 3); pipes and redirects are not capped.
 
 ### Time fields in JSON
 

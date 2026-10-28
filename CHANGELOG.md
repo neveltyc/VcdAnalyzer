@@ -3,6 +3,54 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
+## [1.6.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.1) - 2026-10-28
+
+### Added
+
+- `-o/--output FILE` on every query command: the whole result goes to FILE (published atomically) and stdout gets
+  a one-line receipt — lines, bytes and path, a JSON object under `--json`.
+
+### Changed
+
+- Output to an interactive terminal stops after 1 MiB with an `>> OUTPUT CUT` notice pointing to `--output` or a
+  pipe, and exit status 3; pipes and redirects still receive everything.
+- Index block size is automatic (was a fixed 8 MiB): builds start at 1 MiB blocks and merge neighbouring blocks
+  only while the sidecar would exceed 2% of the source, up to 8 MiB. Indexed point queries drop from ~0.6-1.2 s to
+  ~0.1-0.3 s on typical dumps (index ~0.2% of the source); designs with thousands of signals active in every block
+  coarsen. Both builders share the policy; `index --block-mib N` forces a size; `index` reports it (`block_bytes`).
+- Automatic background index builds start at 10 MiB (was 128 KiB): smaller dumps get no new sidecar, while an
+  existing stale one is still rebuilt. `index` builds at any size and warns when queries will not use the result.
+- Sidecar freshness adds a content fingerprint to `(size, mtime_ns)`: a footer hashes eight 4 KiB samples of the
+  source, so a different dump with the same size and a preserved mtime (`cp -p`, `rsync -t`, tar) is detected for
+  a few small reads per query. Sidecars written by 1.6.0 are treated as stale and rebuilt.
+- A background build writes `<file>.vcidx.log` only when it fails and removes it after a later success; queries
+  no longer create `<file>.vcidx.lock`.
+- Native libraries are built in CI with a pinned toolchain (Rust 1.96.0, zig 0.16.0, cargo-zigbuild 0.24.0);
+  the CI `native` job rejects a release file whose embedded libraries differ from its build (the macOS
+  library's per-build `LC_UUID` and code signature aside), and its artifact is what gets embedded. The macOS
+  library no longer records the build machine's path. `_make.py --check` verifies the full file byte-exactly;
+  without `native/dist/` the full build reuses the embedded libraries.
+- The lite build no longer imports the index engine's modules.
+
+### Fixed
+
+- Bit-exploded buses cost O(width) Python work per tick. A 10 MB dump of a bit-exploded 1024-bit bus changing one
+  bit per tick took ~8 s for `snapshot`, `compare` and `summary`, now ~1.8 s; `snapshot`/`compare` no longer depend
+  on the bus width.
+- `summary` kept every distinct value of a wide signal alive: a 1 MB dump of a bit-exploded 16384-bit bus used
+  612 MB and 6.5 s, now 41 MB and ~0.5 s. Values over 32 characters are counted by (length, hash); a collision
+  (~1e-10 within the 65536-value cap) would undercount `unique` by one.
+- Vectors whose decimal form exceeds Python's integer-to-string digit limit (4300 digits by default on 3.11+ and
+  the 3.8.14+/3.9.14+/3.10.7+ security releases, none before, `PYTHONINTMAXSTRDIGITS` otherwise) printed in binary,
+  so a wide vector's format depended on its value, the Python patch level and the environment. They now always
+  print `decimal (0xhex)`.
+- An index the usage gate rejects (declaration-heavy or tiny dumps) made every query parse the VCD header twice;
+  the gate is now decided from the sidecar's own header.
+- `vcd_analyzer_lite.py index --auto` crashed with a NameError, and `index` with an existing sidecar answered
+  "already exists" instead of pointing to the full build.
+
+Validation: 333 tests pass on Python 3.8, 3.11, 3.12 and 3.13 (Linux).
+
 ## [1.6.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.0) - 2026-10-25
 
 ### Added
@@ -31,6 +79,7 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
   a release file that drifts from it.
 - Sidecar freshness is `(size, mtime_ns)` recorded at build time — O(1) per query, no content
   hashing.
+- `list --json` renames `aliases_in_file` (1.5.6) to `aliases_total`.
 
 ### Fixed
 
@@ -40,8 +89,10 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
   identical to the plain parser on the parser's full torture corpus — including malformed
   timestamps, adversarial encodings and hostile inputs that previously could corrupt a
   multi-threaded build.
+- Mismatched real values written to logic-vector identifiers (e.g. `rnan`, `r-1.5`) are passed
+  through without padding, avoiding an uncaught KeyError.
 
-## [1.5.6]## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-18
+## [1.5.6](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.6) - 2026-10-17
 
 ### Fixed
 
@@ -50,15 +101,14 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 - A UTF-8 BOM no longer hides a leading `$timescale`; a missing or unparseable `$timescale` now warns on stderr before falling back to 1ps.
 - Short vector spellings of one value (`b11` / `b0011`) are no longer reported as changes by `compare`, `summary`, `dump` or `changed()`.
 - `summary` counts match `search changed()`: a first observation inside the window defines the signal (`defined_at`) instead of counting as a change, and event variables count every trigger.
-- `list` text output prints matched aliases out of all aliases instead of N/N; JSON adds `aliases_total`.
-- Mismatched real values written to logic-vector identifiers (e.g. `rnan`, `r-1.5`) are passed through without padding, avoiding an uncaught KeyError.
+- `list` text output prints matched aliases out of all aliases in the file instead of N/N; JSON adds `aliases_in_file`.
 
 ### Changed
 
 - Contiguous bit-exploded runs that do not start at bit 0 are reassembled as a part-select (`bus[15:8]`).
 - Verbose JSON `raw` values of logic vectors are full width.
 
-Validation: 249 tests pass.
+Validation: 247 tests pass.
 
 ## [1.5.5](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.5.5) - 2026-10-12
 

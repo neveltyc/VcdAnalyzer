@@ -12,12 +12,17 @@ Commands:
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
   search     <file> --condition C [--condition C ...] [--show K1,K2] [--begin T] [--end T]
                                                         Conditional search and associated signal observation
+  index      <file> [--block-mib N] [--force] [--output PATH]
+                                                        Build the optional .vcidx sidecar (full variant)
 
 Global options:
   --json       Output compact structured JSON instead of text (time fields include *_ticks)
   --limit N    Max rows/records to emit; default 500; 0 = unlimited.
                Streaming commands stop after detecting the first unshown result.
   --verbose    Show extra fields; if --limit is omitted, disables truncation
+  -o FILE      (query commands) Write the result to FILE; stdout gets a one-line receipt.
+               On an interactive terminal, stdout output stops after 1 MiB (exit status 3);
+               pipes and redirects receive everything.
 
 Argument formats:
   <file>          VCD file path
@@ -91,20 +96,16 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.6.0'
+__version__ = '1.6.1'
 
 import sys
 import os
 import re
 import math
+import decimal
 import json
 import argparse
 import tempfile
-import subprocess
-from array import array
-import bisect
-import mmap
-import struct
 import time
 from collections import defaultdict
 from fractions import Fraction
@@ -512,6 +513,28 @@ def fmt_time(ts, ts_sec):
 # ================================================================
 
 
+# Exact integer context for _decimal_text: no rounding at any width.
+_DECIMAL_EXACT = decimal.Context(prec=decimal.MAX_PREC, Emax=decimal.MAX_EMAX)
+
+
+def _decimal_text(n):
+    """Decimal digits of a non-negative int, whatever the interpreter allows.
+
+    str(int) refuses values beyond sys.get_int_max_str_digits() decimal
+    digits — 4300 by default on 3.11+ and on the 3.8.14+/3.9.14+/3.10.7+
+    security releases (CVE-2020-10735), none before them, and anything
+    PYTHONINTMAXSTRDIGITS says (down to 640). fmt_val used to fall back to
+    binary when it refused, so a vector's format depended on its value, the
+    Python patch level and the environment. Values below 2**2048 (at most
+    617 digits) are under every possible limit and keep the fast str();
+    wider ones go through the decimal module, which has no such limit and
+    gives the same digits everywhere.
+    """
+    if n.bit_length() <= 2048:
+        return str(n)
+    return str(_DECIMAL_EXACT.create_decimal(n))
+
+
 def fmt_val(value, info):
     """Format signal value per IEEE 1364-2005 18.2.2.
 
@@ -551,7 +574,7 @@ def fmt_val(value, info):
     try:
         d = int(value, 2)
         hw = max((width + 3) // 4, 1)
-        return f'{d} (0x{format(d, "x").zfill(hw)})'
+        return f'{_decimal_text(d)} (0x{format(d, "x").zfill(hw)})'
     except ValueError:
         return 'b' + value
 
@@ -792,6 +815,12 @@ _SIM_KEYWORDS = {'$dumpall', '$dumpoff', '$dumpon', '$dumpvars',
 # breaks on. Used by the t_max tail scan to find token boundaries when
 # stitching a token split across a fixed-size read.
 _ASCII_WS_BYTES = frozenset(b' \t\n\r\f\v')
+
+
+def _bus_bytes(bits):
+    """A bit-exploded bus value as a mutable MSB-first byte string, from a
+    per-bit list indexed by bit number (see _iter_changes)."""
+    return bytearray(''.join(reversed(bits)), 'ascii')
 
 
 class VCDParser:
@@ -1586,7 +1615,7 @@ class VCDParser:
 
         def _commit_buses():
             for gid in bus_dirty:
-                _record(gid, ''.join(reversed(bit_state[gid])))
+                _record(gid, bit_state[gid].decode('ascii'))
             bus_dirty.clear()
 
         def _flush():
@@ -1625,9 +1654,15 @@ class VCDParser:
         # this query. This avoids touching large unrelated bit-exploded
         # buses during catch-up scans, while preserving exact behavior for
         # selected buses and for no-filter calls.
+        #
+        # Each bus value is a bytearray of its bits, MSB first: a bit write is
+        # one byte store (at width-1-idx) and the assembled value is a single
+        # C-level decode. Joining a per-bit list instead made every tick that
+        # touched a bus cost O(width) Python-level work — on a bit-exploded
+        # 4096-bit bus changing one bit per tick that was ~75% of a snapshot.
         if sids is None:
             bit_map = self._bit_map
-            bit_state = {gid: bits[:] for gid, bits in self._bit_state_template.items()}
+            needed_gids = self._bit_state_template
         else:
             bit_map = {}
             needed_gids = set()
@@ -1637,7 +1672,8 @@ class VCDParser:
                     bit_map[sym0] = kept
                     for gid, _idx in kept:
                         needed_gids.add(gid)
-            bit_state = {gid: self._bit_state_template[gid][:] for gid in needed_gids}
+        bit_state = {gid: _bus_bytes(self._bit_state_template[gid]) for gid in needed_gids}
+        bit_top = {gid: len(state) - 1 for gid, state in bit_state.items()}
         # A synthesized bus has no previous observation until at least one of
         # its bit identifiers occurs. The template's all-x value is not an
         # observation and must not suppress a first all-x record in the window.
@@ -1707,7 +1743,7 @@ class VCDParser:
                         # in the catch-up loop would make the head scan O(width)
                         # per bit change.
                         for gid in observed_bit_buses:
-                            last_val[gid] = ''.join(reversed(bit_state[gid]))
+                            last_val[gid] = bit_state[gid].decode('ascii')
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -1753,9 +1789,9 @@ class VCDParser:
                 # every signal in dump scope.
                 if cur_t < t0:
                     if sym in bit_map:
-                        bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
+                        bit = ord(val) if len(val) == 1 and _is_4state_bits(val) else 120  # 'x'
                         for gid, idx in bit_map[sym]:
-                            bit_state[gid][idx] = bit_val
+                            bit_state[gid][bit_top[gid] - idx] = bit
                             observed_bit_buses.add(gid)
                     if sids is None or sym in sids:
                         info = signals.get(sym)
@@ -1780,19 +1816,20 @@ class VCDParser:
                 # agent would see clk as a flat line. Fall through to the
                 # standalone block so both signals update on the same value_change.
                 if sym in bit_map:
-                    bit_val = val if len(val) == 1 and _is_4state_bits(val) else 'x'
+                    bit = ord(val) if len(val) == 1 and _is_4state_bits(val) else 120  # 'x'
                     for gid, idx in bit_map[sym]:
+                        pos = bit_top[gid] - idx
                         if sids is None or gid in sids:
                             written = bus_dirty.get(gid)
                             if written is None:
                                 bus_dirty[gid] = {idx}
                             elif idx in written:
-                                if bit_state[gid][idx] != bit_val:
-                                    _record(gid, ''.join(reversed(bit_state[gid])))
+                                if bit_state[gid][pos] != bit:
+                                    _record(gid, bit_state[gid].decode('ascii'))
                                 bus_dirty[gid] = {idx}
                             else:
                                 written.add(idx)
-                        bit_state[gid][idx] = bit_val
+                        bit_state[gid][pos] = bit
 
                 # Standalone signal (may run after the bit-bus branch above when
                 # the sym serves both roles).
@@ -1994,15 +2031,13 @@ def try_index(vcd_path):
 
 
 def maybe_auto_build(parser, vcd_path):
-    """Never builds in the standard variant (notice came from try_index)."""
+    """Never builds in the lite build."""
     return None
 
 
-def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
-    sys.exit('Error: ' + _FAST_ONLY)
-
-
 def cmd_index(vcd, args):
+    """Every `index` invocation — explicit, --force, --output or the hidden
+    --auto — gets the same pointer to the full build."""
     sys.exit('Error: ' + _FAST_ONLY)
 # ================================================================
 # Part 5: Output helpers
@@ -2050,6 +2085,162 @@ def _json(obj):
         write('}\n')
         return
     print(json.dumps(obj, ensure_ascii=False, separators=(',', ':')))
+
+
+# -- where results go -----------------------------------------------------
+#
+# A query writes its result to stdout. Three destinations, three policies:
+#   * --output FILE: the whole result goes to FILE (published atomically),
+#     stdout gets a one-line receipt — the way to keep an unlimited dump.
+#   * a pipe or a redirect: everything is streamed; the caller chose where
+#     it goes (| grep, | less, > file).
+#   * an interactive terminal: output stops after _TERMINAL_BUDGET with a
+#     notice. A `--limit 0 dump` of a big dump is hundreds of MB that
+#     nobody reads on a terminal and that takes minutes to scroll past.
+
+_TERMINAL_BUDGET = 1 << 20
+_EXIT_OUTPUT_CUT = 3
+
+
+class _OutputPathError(Exception):
+    """--output cannot be written (reported as a CLI error, not as an
+    unreadable VCD)."""
+
+
+class _OutputBudgetExceeded(Exception):
+    """Raised through the command when the terminal budget is spent."""
+
+
+class _TerminalBudget:
+    """stdout proxy for an interactive terminal: passes text through until
+    _TERMINAL_BUDGET characters, ends on the last whole line within it,
+    then stops the command. (print() writes a line and its newline
+    separately, so a write may hold no newline at all; the cut then falls
+    after the previous write. Only output that has no line break within the
+    whole budget — one huge JSON line — is shown cut mid-line.)"""
+
+    def __init__(self, stream, budget):
+        self._stream = stream
+        self._budget = self._left = budget
+
+    def write(self, text):
+        if len(text) <= self._left:
+            self._left -= len(text)
+            return self._stream.write(text)
+        head = text[:self._left]
+        cut = head.rfind('\n')
+        if cut >= 0:
+            self._stream.write(head[:cut + 1])
+        elif self._left == self._budget:
+            self._stream.write(head)
+        self._left = 0
+        raise _OutputBudgetExceeded()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+class _CountingSink:
+    """File proxy that counts the lines written through it."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.lines = 0
+
+    def write(self, text):
+        self.lines += text.count('\n')
+        return self._stream.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _same_file(path, other):
+    """True when path names the same file as other (also via links)."""
+    return (os.path.realpath(path) == os.path.realpath(other)
+            or (os.path.exists(path) and os.path.exists(other)
+                and os.path.samefile(path, other)))
+
+
+def _is_terminal(stream):
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _run_command(command, vcd, args):
+    """Run a query command against the destination its output should go to."""
+    target = getattr(args, 'output_file', None)
+    if target:
+        return _run_to_file(command, vcd, args, target)
+    stdout = sys.stdout
+    if not _is_terminal(stdout):
+        return command(vcd, args)
+    sys.stdout = _TerminalBudget(stdout, _TERMINAL_BUDGET)
+    try:
+        command(vcd, args)
+    except _OutputBudgetExceeded:
+        sys.stdout = stdout
+        stdout.flush()
+        sys.stderr.write(
+            '\n>> OUTPUT CUT: {} MiB shown on the terminal. Write the whole result to a file '
+            'with --output FILE, or pipe it (| less, | grep, > file).\n'.format(
+                _TERMINAL_BUDGET >> 20))
+        # A distinct status, so a script driving a pseudo-terminal can tell
+        # a cut result (possibly a half JSON document) from a complete one.
+        sys.exit(_EXIT_OUTPUT_CUT)
+    finally:
+        sys.stdout = stdout
+
+
+def _run_to_file(command, vcd, args, target):
+    """Write the command's stdout to target (via a temp file in the same
+    directory, renamed on success), then print a receipt on stdout."""
+    target = os.path.abspath(target)
+    if _same_file(target, args.file):
+        raise _OutputPathError('--output must not be the VCD file itself')
+    if os.path.isdir(target):
+        raise _OutputPathError('cannot write --output {}: it is a directory'.format(target))
+    # Created like a shell redirect would (mode 0666 minus the umask), not
+    # with mkstemp's private 0600: the result is the user's file.
+    temp = '{}.{}.part'.format(target, os.getpid())
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except OSError as error:
+        raise _OutputPathError('cannot write --output {}: {}'.format(
+            target, error.strerror or error))
+    stdout = sys.stdout
+    published = False
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as sink:
+            counted = _CountingSink(sink)
+            sys.stdout = counted
+            try:
+                command(vcd, args)
+            except SystemExit as stop:
+                if stop.code not in (None, 0):
+                    raise
+            finally:
+                sys.stdout = stdout
+        try:
+            os.replace(temp, target)
+        except OSError as error:
+            raise _OutputPathError('cannot write --output {}: {}'.format(
+                target, error.strerror or error))
+        published = True
+    finally:
+        if not published:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+    size = os.path.getsize(target)
+    if getattr(args, 'json', False):
+        print(json.dumps({'output': target, 'bytes': size, 'lines': counted.lines},
+                         ensure_ascii=False, separators=(',', ':')))
+    else:
+        print('Wrote {:,} lines ({:,} bytes) to {}'.format(counted.lines, size, target))
 
 
 def _limit(args):
@@ -2911,6 +3102,22 @@ def _transition_groups(vcd, t0, t1, sids):
 # Part 7: Window summary
 # ================================================================
 
+def _unique_key(val):
+    """Distinct-value key for summary's `unique` count. Values up to 32
+    characters are kept as-is; longer ones (wide buses) by (length, hash),
+    so each set entry stays small instead of holding the value: a
+    bit-exploded 16384-bit bus with a fresh value every tick otherwise kept
+    ~600 MB of strings alive for a 1 MB file. hash() is the string hash the
+    set would compute anyway (no extra pass over the value, unlike a
+    cryptographic digest, which cost ~5 us per 8 KiB value per tick). A
+    collision among the at most VCD_ANALYZER_MAX_UNIQUE_VALUES keys is
+    ~1e-10 likely and would undercount by one; a tuple never equals a
+    short value (str)."""
+    if len(val) <= 32:
+        return val
+    return len(val), hash(val)
+
+
 def _summary_rows(vcd, t0, t1, sids):
     """Return (rows, undefined, counts) for window summary.
 
@@ -2958,7 +3165,7 @@ def _summary_rows(vcd, t0, t1, sids):
         return {
             'changes': 0, 'first_at': None, 'last_at': None,
             'initial': init_val, 'last': init_val,
-            'unique': {init_val} if init_val is not None else set(),
+            'unique': {_unique_key(init_val)} if init_val is not None else set(),
             'unique_capped': False,
             'rise_count': 0 if is_scalar else None,
             'fall_count': 0 if is_scalar else None,
@@ -3006,9 +3213,10 @@ def _summary_rows(vcd, t0, t1, sids):
             # Once capped the set is frozen, so skip the per-value hash
             # entirely — this is the exact tens-of-millions hot path the cap
             # exists for.
-            if not s['unique_capped'] and val not in s['unique']:
+            key = None if s['unique_capped'] else _unique_key(val)
+            if key is not None and key not in s['unique']:
                 if len(s['unique']) < unique_cap:
-                    s['unique'].add(val)
+                    s['unique'].add(key)
                 else:
                     # At cap: the count stays a lower bound, flagged on the row.
                     s['unique_capped'] = True
@@ -3071,93 +3279,6 @@ def _public_row(row, verbose=False):
 # ================================================================
 # Part 8: Commands
 # ================================================================
-
-def cmd_index(vcd, args):
-    """Build the optional .vcidx sidecar for fast random access.
-
-    Explicit by design for interactive use: queries never write (the
-    background auto-builder is the one exception, gated by its own lock).
-    --output stores the sidecar at PATH and links <file>.vcidx to it so
-    queries still find it; a failed link is reported, never fatal. The
-    full variant builds via its embedded native library when one serves
-    the platform, else the pure-Python pass (identical sidecar semantics).
-    """
-    sidecar = sidecar_path(args.file)
-    target = os.path.abspath(args.output) if args.output else sidecar
-    if args.output:
-        # Sidecars are always named *.vcidx — an arbitrary extension would
-        # leave unrecognizable binary files on disk and invite confusion
-        # with the waveform itself.
-        if not target.endswith('.vcidx'):
-            sys.exit('Error: --output must end with .vcidx '
-                     '(e.g. --output {}{})'.format(target, '.vcidx'))
-        # --output pointing at the input VCD would REPLACE the waveform
-        # with the sidecar at publication; --force must not bypass this.
-        same = (os.path.realpath(target) == os.path.realpath(args.file)
-                or (os.path.exists(target)
-                    and os.path.exists(args.file)
-                    and os.path.samefile(target, args.file)))
-        if same:
-            sys.exit('Error: --output must not be the VCD file itself')
-    auto = bool(getattr(args, 'auto', False))
-    lock_fd = None
-    if auto:
-        # The background builder holds the OS lock for its own lifetime.
-        # A lost race (another builder grabbed it) exits quietly.
-        lock_fd = _acquire_build_lock(sidecar)
-        if lock_fd is None:
-            sys.exit(0)
-    try:
-        if os.path.exists(target) and not (args.force or auto):
-            sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
-        block_bytes = args.block_mib << 20
-        try:
-            stats = build_index_best(args.file, target, block_bytes,
-                                     threads=getattr(args, 'threads', None))
-        except (ValueError, _VCDResourceError, struct.error, KeyError) as error:
-            # Builders publish atomically and clean their OWN temp files;
-            # a failed rebuild must leave a pre-existing target untouched.
-            sys.exit('Error: cannot index {}: {}'.format(args.file, error))
-        if args.output:
-            _link_sidecar(sidecar, target)
-    finally:
-        if lock_fd is not None:
-            os.close(lock_fd)  # releases the OS lock; the file is kept
-    builder = stats.get('builder', 'python')
-    r = {'file': args.file, 'sidecar': sidecar,
-         'builder': builder,
-         'build_s': round(stats.get('build_s', 0.0), 3),
-         'source_bytes': stats.get('source_bytes'),
-         'index_bytes': stats.get('index_bytes'),
-         'index_pct': round(100.0 * stats.get('index_bytes', 0)
-                            / max(1, stats.get('source_bytes', 1)), 4),
-         'blocks': stats.get('blocks'),
-         'raw_symbols': stats.get('raw_symbols'),
-         'signal_block_pairs': stats.get('signal_block_pairs'),
-         'threads': stats.get('threads', 1),
-         'parallel_fallback': stats.get('parallel_fallback', False)}
-    if args.json:
-        if builder == 'python' and r['source_bytes'] >= 64 << 20:
-            _warn('index built with the slower pure-Python mechanism '
-                  '(no native builder for this platform)', cat='index_slow_build')
-        _json(r)
-        return
-    print('Built    : {}'.format(target))
-    print('Builder  : {}'.format(builder))
-    print('Source   : {:,} bytes'.format(r['source_bytes']))
-    print('Index    : {:,} bytes ({:.4f}%)'.format(r['index_bytes'], r['index_pct']))
-    print('Blocks   : {} x {} MiB'.format(r['blocks'], args.block_mib))
-    print('Symbols  : {} raw, {:,} signal-block pairs'.format(
-        r['raw_symbols'], r['signal_block_pairs']))
-    print('Time     : {:.3f}s'.format(r['build_s']))
-    if builder == 'python' and r['source_bytes'] >= 64 << 20:
-        # Full variant, no library for this platform: say so when the file
-        # is big enough for the difference to matter.
-        print('Note     : no native builder for this platform — building with '
-              'the pure-Python index mechanism (much slower). Supported '
-              'platforms build natively with up to 4 threads.')
-    print('Use      : queries pick this up automatically; VCD_ANALYZER_NO_INDEX=1 disables')
-
 
 def cmd_info(vcd, args):
     _limit(args)
@@ -3828,6 +3949,13 @@ def _add_filter(sp):
                     help='comma-separated substring/glob patterns, case-insensitive')
 
 
+def _add_output(sp):
+    sp.add_argument('-o', '--output', dest='output_file', metavar='FILE', default=None,
+                    help='write the result to FILE instead of stdout (stdout gets a one-line '
+                         'receipt); use it to keep a --limit 0 result. On a terminal, stdout '
+                         'output stops after 1 MiB')
+
+
 def _add_common(sp):
     # Also accept global-style output controls after the subcommand.
     # Defaults are SUPPRESS so values supplied before the subcommand survive.
@@ -3857,8 +3985,9 @@ def main():
 
     sp = sub.add_parser('index', help='build the optional .vcidx sidecar for fast random access')
     sp.add_argument('file', metavar='<file>')
-    sp.add_argument('--block-mib', type=int, default=8, metavar='N',
-                    help='index block size in MiB, 1..4096 (default 8)')
+    sp.add_argument('--block-mib', type=int, default=None, metavar='N',
+                    help='index block size in MiB, 1..4096 (default: automatic — '
+                         '1 MiB, doubled while the index would exceed 2%% of the file)')
     sp.add_argument('--force', action='store_true',
                     help='rebuild even if the sidecar already exists')
     sp.add_argument('--output', metavar='PATH', default=None,
@@ -3869,29 +3998,31 @@ def main():
     _add_common(sp)
 
     sp = sub.add_parser('info', help='file overview: timescale, signal count, time span, scopes')
-    sp.add_argument('file', metavar='<file>', help='VCD file path'); _add_common(sp)
+    sp.add_argument('file', metavar='<file>', help='VCD file path'); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('list', help='list signals with path and bit width')
-    sp.add_argument('file', metavar='<file>'); _add_filter(sp); _add_common(sp)
+    sp.add_argument('file', metavar='<file>'); _add_filter(sp); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('dump', help='print value-change events in time order')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('summary', help='window stats: active/static/undefined selected signals')
     sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('snapshot', help='known signal values at a given time point')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='TIME', required=True, help='time point, e.g. 17.55us')
-    _add_filter(sp); _add_common(sp)
+    _add_filter(sp); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('compare', help='diff known signal values between two time points')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='T1,T2', required=True, help='two time points comma-separated, e.g. 17.5us,17.7us')
-    _add_filter(sp); _add_common(sp)
+    _add_filter(sp); _add_common(sp); _add_output(sp)
 
     sp = sub.add_parser('search', help='conditional search and associated signal observation')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_common(sp)
+    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_common(sp); _add_output(sp)
     sp.add_argument('--condition', metavar='COND', required=True, action='append',
                     help='comma-separated AND terms: SIG=VAL, SIG!=VAL, or changed(SIG); '
                          '!= does not match x/z/undef. Repeat the flag to OR the clauses '
@@ -3936,7 +4067,10 @@ def main():
                     sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
                 except (OSError, ValueError):
                     pass
-            cmds[args.cmd](vcd, args)
+            if args.cmd == 'index':
+                cmd_index(vcd, args)
+            else:
+                _run_command(cmds[args.cmd], vcd, args)
         finally:
             close = getattr(vcd, 'close', None)
             if close is not None:
@@ -3960,6 +4094,8 @@ def main():
     except _ConditionParseError as e:
         sys.exit('Error: ' + str(e))
     except _VCDResourceError as e:
+        sys.exit('Error: ' + str(e))
+    except _OutputPathError as e:
         sys.exit('Error: ' + str(e))
     except _FilterParseError as e:
         # Reaches here only if raised from VCDParser.match() at runtime;

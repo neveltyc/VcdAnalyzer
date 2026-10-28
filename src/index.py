@@ -12,16 +12,6 @@
 # Python build pass below; queries are identical either way. Disable with
 # VCD_ANALYZER_NO_INDEX=1 (never use).
 
-BLOCK = struct.Struct('<QQqq')
-DIRECTORY = struct.Struct('<QII')
-POSTING = struct.Struct('<II')
-MAGIC = b'VCDIDX01'
-MAGIC2 = b'VCDIDX02'   # same layout; postings may use the compact modes below
-# Posting entry encodings by directory mode. fmt reads ONE entry; size is the
-# stride; runs marks block-RANGE pairs (no record pointers) vs point pairs.
-# Modes 0/1 are the original 8-byte encodings (VCDIDX01, Python builder);
-# 2/3 are the compact 6/4-byte forms written by the Rust builder when the
-
 HEADER = struct.Struct('<8sQQQQQQ')
 BLOCK = struct.Struct('<QQqq')
 DIRECTORY = struct.Struct('<QII')
@@ -39,6 +29,24 @@ ENTRY = {
     2: (struct.Struct('<HI'), 6, False),
     3: (struct.Struct('<HH'), 4, True),
 }
+# Content-fingerprint footer, appended after the postings by both builders.
+# The header's (size, mtime_ns) catches every ordinary rewrite in O(1); the
+# footer also catches a DIFFERENT dump that arrives with the same size and a
+# preserved mtime (cp -p, rsync -t, tar/zip extraction). It hashes a fixed
+# number of small samples spread evenly over the source — the header region
+# ($date/$version) and the tail included — so verifying it costs the same few
+# positioned reads whatever the file size. A sidecar without the footer
+# (written by 1.6.0) counts as stale and is rebuilt.
+FOOTER = struct.Struct('<8sII16s')
+FOOTER_MAGIC = b'VCDFPR01'
+FINGERPRINT_SAMPLES = 8
+FINGERPRINT_SAMPLE_BYTES = 4096
+
+
+def _index_pays_off(data_bytes, raw_symbols):
+    """The per-file usage gate (see IndexedVCD.index_advisable)."""
+    return data_bytes >= 128 << 10 and data_bytes >= 64 * raw_symbols
+
 
 class _CorruptSidecarError(RuntimeError):
     """The sidecar failed an on-demand integrity check (e.g. a posting
@@ -54,6 +62,66 @@ def _pread(fd, size, offset):
         return os.pread(fd, size, offset)
     os.lseek(fd, offset, os.SEEK_SET)
     return os.read(fd, size)
+
+
+def _source_fingerprint(fd, size, samples=FINGERPRINT_SAMPLES,
+                        sample_bytes=FINGERPRINT_SAMPLE_BYTES):
+    digest = hashlib.blake2b(struct.pack('<QII', size, samples, sample_bytes),
+                             digest_size=16)
+    if size <= samples * sample_bytes:
+        offsets = range(0, size, sample_bytes)  # small file: all of it
+    else:
+        span = size - sample_bytes
+        offsets = [span * k // (samples - 1) for k in range(samples)]
+    for offset in offsets:
+        digest.update(_pread(fd, sample_bytes, offset))
+    return digest.digest()
+
+
+def _footer_mismatch(footer, fd, size):
+    """Why the footer bytes do not vouch for the source behind fd, or None."""
+    if len(footer) != FOOTER.size:
+        return 'truncated index'
+    magic, samples, sample_bytes, digest = FOOTER.unpack(footer)
+    if magic != FOOTER_MAGIC:
+        return 'no content fingerprint (built by an older version); rebuild it'
+    if not (2 <= samples <= 64 and 1 <= sample_bytes <= 1 << 20):
+        return 'corrupt content fingerprint'
+    if _source_fingerprint(fd, size, samples, sample_bytes) != digest:
+        return 'stale index (source content changed)'
+    return None
+
+
+def _seal_sidecar(path, built, sidecar):
+    """Append the fingerprint footer to a freshly built sidecar and publish
+    it atomically at `sidecar` (the builders write to `built`). The source
+    must still match the size/mtime the builder recorded, so the footer can
+    only ever describe the bytes the index was built from."""
+    published = False
+    try:
+        with open(built, 'rb') as f:
+            head = f.read(24)
+        _magic, size, mtime = struct.unpack_from('<8sQQ', head, 0)
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+        try:
+            stat = os.fstat(fd)
+            if (stat.st_size, stat.st_mtime_ns) != (size, mtime):
+                raise ValueError('source changed while building index')
+            footer = FOOTER.pack(FOOTER_MAGIC, FINGERPRINT_SAMPLES,
+                                 FINGERPRINT_SAMPLE_BYTES,
+                                 _source_fingerprint(fd, size))
+        finally:
+            os.close(fd)
+        with open(built, 'ab') as f:
+            f.write(footer)
+        os.replace(built, sidecar)
+        published = True
+    finally:
+        if not published:
+            try:
+                os.unlink(built)
+            except OSError:
+                pass
 
 
 class PositionedToken(str):
@@ -83,7 +151,8 @@ def tokens(fd, start, end, counters=None, chunk_size=1 << 20):
         for match in re.finditer(rb'\S+', data[:cut]):
             token = match.group().decode('utf-8', 'replace')
             if len(token.split()) != 1:
-                raise ValueError('prototype does not support non-ASCII whitespace')
+                raise ValueError('non-ASCII whitespace inside a token is not supported '
+                                 'by the index builder')
             if len(token) > MAX_DATA_TOKEN_LEN:
                 raise _VCDResourceError('VCD token too long')
             yield PositionedToken(token, base + match.start())
@@ -148,7 +217,7 @@ def items(parser, fd, start, end, initial_time=0, counters=None, chunk_size=1 <<
             if value is None:
                 # Tolerated malformed timestamp (e.g. '#1.5'): the reference
                 # parser skips it entirely, so it must not act as a commit
-                # point for pending bus writes either (review P1-2).
+                # point for pending bus writes either.
                 yield token.offset, before, 'marker', current, None, None
                 continue
             if value < current:
@@ -175,21 +244,62 @@ def raw_symbols(parser):
     return out
 
 
-def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
+# Index granularity. A point query parses the queried block from its start
+# (~0.15 s per MiB in pure Python), so its cost follows the block size, while
+# the sidecar holds one entry per (signal, block) that saw a change. Builds
+# therefore start at AUTO_BLOCK_BYTES and merge neighbouring blocks pairwise
+# (doubling the block size) only while the sidecar would exceed
+# index_budget(): typical dumps keep 1 MiB blocks at ~0.2% of the source;
+# wide designs with thousands of signals active in every block coarsen until
+# they fit (a 20k-signal dump stops at 8 MiB, 1.6%). Coarsening stops at
+# AUTO_MAX_BLOCK_BYTES, the fixed size 1.6.0 used, even over budget: past it
+# a point query re-parses so much that the index loses to a plain scan (a
+# 60k-signal dump whose directory alone exceeds the budget once merged down
+# to a single block and ran 4x slower than no index). An explicit block size
+# (`index --block-mib`) is used as given.
+AUTO_BLOCK_BYTES = 1 << 20
+AUTO_MAX_BLOCK_BYTES = 8 << 20
+
+
+def index_budget(source_bytes):
+    """Largest sidecar the automatic block size accepts: 2% of the source."""
+    return max(source_bytes // 50, 256 << 10)
+
+
+def _sidecar_bytes(nblocks, nsymbols, pairs):
+    """Size of a sidecar layout as the budget sees it, fingerprint footer
+    included. Postings are counted at the native builder's encoding (6
+    bytes while block ids fit u16, else 8) for both builders, so they pick
+    the same block size; the pure-Python builder's own 8-byte postings may
+    land slightly over the budget."""
+    entry_bytes = 6 if nblocks <= 65535 else 8
+    return (HEADER.size + BLOCK.size * nblocks + DIRECTORY.size * nsymbols
+            + entry_bytes * pairs + FOOTER.size)
+
+
+def _merge_block_pairs(blocks):
+    """Blocks 2k and 2k+1 as one block, or None when a merged block would no
+    longer fit the u32 record offsets of the postings."""
+    merged = [(blocks[i][0], blocks[min(i + 1, len(blocks) - 1)][1],
+               blocks[i][2], blocks[min(i + 1, len(blocks) - 1)][3])
+              for i in range(0, len(blocks), 2)]
+    if any(end - begin > 0xFFFFFFFF for begin, end, _t0, _t1 in merged):
+        return None
+    return merged
+
+
+def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=None,
+                max_block_bytes=None):
+    """Pure-Python builder (the reference the native one mirrors). With
+    max_index_bytes, neighbouring blocks are merged pairwise while the
+    sidecar would exceed it and the doubled block size stays within
+    max_block_bytes (None: no cap), as the native builder does."""
     start_clock = time.perf_counter()
     parser = VCDParser(str(path))
-    header_seconds = time.perf_counter() - start_clock
     symbols = raw_symbols(parser)
     raw_id = {s: i for i, s in enumerate(symbols)}
-    memberships = [array('I') for _ in symbols]
-    last_positions = [array('I') for _ in symbols]
-    modes = bytearray(len(symbols))  # 0: block/last-offset pairs; 1: membership runs
-    payload_bytes = 0
-    conversions = 0
-    coarsens = 0
-    initial_block_bytes = block_bytes
-    if budget_bytes is not None and HEADER.size + DIRECTORY.size*len(symbols) > budget_bytes:
-        raise ValueError('budget smaller than fixed signal directory; time-only fallback required')
+    bids = [array('I') for _ in symbols]
+    offsets = [array('I') for _ in symbols]  # last record, relative to block start
     blocks = []
     recent = {}
     current = 0
@@ -198,95 +308,18 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
     block_initial = 0
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
     stat_before = os.fstat(fd)
-    def as_runs(bids):
-        runs = array('I')
-        for bid in bids:
-            if runs and runs[-1] == bid:
-                runs[-1] = bid+1
-            else:
-                runs.extend((bid,bid+1))
-        return runs
-    def enforce_budget():
-        nonlocal payload_bytes, conversions, coarsens, block_bytes, blocks
-        if budget_bytes is None:
-            return
-        fixed = HEADER.size + DIRECTORY.size*len(symbols)
-        target = int(budget_bytes*0.75)
-        # Structural choice, independent of which signals have been queried:
-        # very dense postings lose fine pointers in exchange for short ranges.
-        for sid,bids in enumerate(memberships):
-            if modes[sid] or len(bids)<8:continue
-            runs=0;previous=-2
-            for bid in bids:
-                if bid!=previous+1:runs+=1
-                previous=bid
-            if runs*8<=len(bids):
-                memberships[sid]=as_runs(bids)
-                last_positions[sid]=array('I')
-                modes[sid]=1;payload_bytes-=(len(bids)-runs)*8;conversions+=1
-        if fixed + len(blocks)*BLOCK.size + payload_bytes <= target:
-            return
-        candidates = []
-        for sid,bids in enumerate(memberships):
-            if modes[sid] or len(bids)<4:
-                continue
-            runs = 0; previous = -2
-            for bid in bids:
-                if bid != previous+1:runs += 1
-                previous=bid
-            saving=(len(bids)-runs)*POSTING.size
-            if saving>0:candidates.append((saving,sid))
-        for saving,sid in sorted(candidates,reverse=True):
-            memberships[sid]=as_runs(memberships[sid])
-            last_positions[sid]=array('I')
-            modes[sid]=1; payload_bytes-=saving; conversions+=1
-            if fixed+len(blocks)*BLOCK.size+payload_bytes<=target:
-                return
-        while fixed+len(blocks)*BLOCK.size+payload_bytes>target:
-            if len(blocks)<=1:
-                if fixed+len(blocks)*BLOCK.size+payload_bytes<=budget_bytes:return
-                raise ValueError('budget cannot hold even a single-block directory')
-            old=blocks
-            blocks=[(old[i][0],old[min(i+1,len(old)-1)][1],
-                     old[i][2],old[min(i+1,len(old)-1)][3]) for i in range(0,len(old),2)]
-            for sid in range(len(symbols)):
-                if modes[sid]:
-                    updated=array('I')
-                    for i in range(0,len(memberships[sid]),2):
-                        a=memberships[sid][i]//2;b=(memberships[sid][i+1]+1)//2
-                        if updated and a<=updated[-1]:updated[-1]=max(updated[-1],b)
-                        else:updated.extend((a,b))
-                    memberships[sid]=updated
-                else:
-                    bids=array('I');positions=array('I')
-                    for bid,relative in zip(memberships[sid],last_positions[sid]):
-                        newbid=bid//2
-                        newrelative=old[bid][0]+relative-blocks[newbid][0]
-                        if bids and bids[-1]==newbid:positions[-1]=newrelative
-                        else:bids.append(newbid);positions.append(newrelative)
-                    memberships[sid]=bids;last_positions[sid]=positions
-            payload_bytes=sum(len(values)*(4 if modes[sid] else 8)
-                              for sid,values in enumerate(memberships))
-            block_bytes*=2;coarsens+=1
     def flush(end):
-        nonlocal recent, block_start, block_initial, payload_bytes
+        nonlocal recent, block_start, block_initial
         if end <= block_start:
             return
         block_id = len(blocks)
         blocks.append((block_start, end, block_initial, current))
         for sid, position in recent.items():
-            if modes[sid]:
-                if memberships[sid] and memberships[sid][-1]==block_id:
-                    memberships[sid][-1]=block_id+1
-                else:
-                    memberships[sid].extend((block_id,block_id+1));payload_bytes+=8
-            else:
-                memberships[sid].append(block_id)
-                last_positions[sid].append(position - block_start);payload_bytes+=8
+            bids[sid].append(block_id)
+            offsets[sid].append(position - block_start)
         recent = {}
         block_start = end
         block_initial = current
-        enforce_budget()
     try:
         for position, before, kind, after, symbol, _value in items(
                 parser, fd, start, stat_before.st_size):
@@ -302,11 +335,34 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
             raise ValueError('source changed while building index')
     finally:
         os.close(fd)
-    pairs = sum(sum(values[i+1]-values[i] for i in range(0,len(values),2))
-                if modes[sid] else len(values) for sid,values in enumerate(memberships))
+    pairs = sum(len(b) for b in bids)
+    coarsens = 0
+    while (max_index_bytes is not None and len(blocks) > 1
+           and (max_block_bytes is None or block_bytes << (coarsens + 1) <= max_block_bytes)
+           and _sidecar_bytes(len(blocks), len(symbols), pairs) > max_index_bytes):
+        merged = _merge_block_pairs(blocks)
+        if merged is None:
+            break
+        for sid in range(len(symbols)):
+            new_bids = array('I')
+            new_offsets = array('I')
+            for bid, relative in zip(bids[sid], offsets[sid]):
+                new = bid // 2
+                relative += blocks[bid][0] - merged[new][0]
+                if new_bids and new_bids[-1] == new:
+                    new_offsets[-1] = relative  # the later record is the last
+                else:
+                    new_bids.append(new)
+                    new_offsets.append(relative)
+            bids[sid] = new_bids
+            offsets[sid] = new_offsets
+        blocks = merged
+        pairs = sum(len(b) for b in bids)
+        coarsens += 1
+    block_bytes <<= coarsens
     posting_start = HEADER.size + BLOCK.size * len(blocks) + DIRECTORY.size * len(symbols)
     # Atomic publication: concurrent readers must never see a half-written
-    # sidecar whose fresh-claiming header already matches (review P0-2).
+    # sidecar whose fresh-claiming header already matches.
     sidecar_tmp = str(sidecar) + '.tmp.{}'.format(os.getpid())
     out = open(sidecar_tmp, 'wb')
     _published = False
@@ -316,24 +372,22 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
         for block in blocks:
             out.write(BLOCK.pack(*block))
         location = posting_start
-        for sid,posting in enumerate(memberships):
-            count=len(posting)//2 if modes[sid] else len(posting)
-            out.write(DIRECTORY.pack(location,count,modes[sid]))
-            location += count * POSTING.size
-        for sid,(bids, offsets) in enumerate(zip(memberships, last_positions)):
+        for posting in bids:
+            out.write(DIRECTORY.pack(location, len(posting), 0))
+            location += len(posting) * POSTING.size
+        for posting, posting_offsets in zip(bids, offsets):
             buf = bytearray()
-            entries=zip(bids[::2],bids[1::2]) if modes[sid] else zip(bids,offsets)
-            for bid, off in entries:
+            for bid, off in zip(posting, posting_offsets):
                 buf.extend(POSTING.pack(bid, off))
                 if len(buf) >= 1 << 20:
                     out.write(buf); buf.clear()
             out.write(buf)
         out.close()
-        os.replace(sidecar_tmp, sidecar)
+        _seal_sidecar(path, sidecar_tmp, sidecar)
         _published = True
     finally:
         if not _published:
-            # Builder-owned cleanup (review finding C): a failed build —
+            # Builder-owned cleanup: a failed build —
             # write error, publish error, anything — removes its OWN temp
             # file; the published sidecar (if any) was never touched by
             # this pass.
@@ -345,34 +399,13 @@ def build_index(path, sidecar, block_bytes=8 << 20, budget_bytes=None):
                 os.unlink(sidecar_tmp)
             except OSError:
                 pass
-    # Compare encodings WITHOUT pretending they are actual measured sidecars.
-    membership_delta_bytes = 0
-    membership_bitset_bytes = 0
-    for sid,bids in enumerate(memberships):
-        if modes[sid]:
-            membership_delta_bytes+=sum(bids[i+1]-bids[i] for i in range(0,len(bids),2))
-            membership_bitset_bytes+=(len(blocks)+7)//8 if bids else 0
-            continue
-        previous = -1
-        for bid in bids:
-            delta = bid - previous
-            membership_delta_bytes += max(1, (delta.bit_length() + 6)//7)
-            previous = bid
-        membership_bitset_bytes += (len(blocks)+7)//8 if bids else 0
     return {
-        'build_s': time.perf_counter()-start_clock,
-        'header_s': header_seconds, 'source_bytes': stat_after.st_size,
+        'build_s': time.perf_counter() - start_clock,
+        'source_bytes': stat_after.st_size,
         'index_bytes': os.path.getsize(sidecar), 'blocks': len(blocks),
         'raw_symbols': len(symbols), 'signal_block_pairs': pairs,
-        'membership_delta_payload_bytes': membership_delta_bytes,
-        'membership_bitset_payload_bytes': membership_bitset_bytes,
-        'directory_bytes': HEADER.size + BLOCK.size*len(blocks) + DIRECTORY.size*len(symbols),
-        'max_block_bytes': max((b[1]-b[0] for b in blocks), default=0),
-        'raw_block_bytes': block_bytes,
-        'initial_block_bytes': initial_block_bytes,
-        'budget_bytes': budget_bytes,
-        'run_encoded_signals': sum(modes),
-        'coarsen_count': coarsens,
+        'block_bytes': block_bytes, 'coarsens': coarsens, 'data_start': start,
+        'max_block_bytes': max((b[1] - b[0] for b in blocks), default=0),
     }
 
 
@@ -383,7 +416,7 @@ class IndexedVCD(VCDParser):
         self._enforce_gate = enforce_gate
         # Freshness first, handles second: a stale sidecar must not leak the
         # source fd (a leaked fd makes lsof report OURSELVES as the writer,
-        # permanently blocking auto-rebuild — review P1-1).
+        # permanently blocking auto-rebuild).
         _st = os.stat(path)
         with open(sidecar, 'rb') as _probe:
             _head = _probe.read(24)
@@ -404,6 +437,12 @@ class IndexedVCD(VCDParser):
             if (magic not in (MAGIC, MAGIC2) or size != stat.st_size
                     or mtime != stat.st_mtime_ns):
                 raise ValueError('stale index')
+            body_end = len(self.mapping) - FOOTER.size
+            if body_end < HEADER.size:
+                raise ValueError('truncated index')
+            reason = _footer_mismatch(self.mapping[body_end:], self.fd, size)
+            if reason:
+                raise ValueError(reason)
             self.file_size = size
             self.symbols = raw_symbols(self)
             if ns != len(self.symbols):
@@ -413,7 +452,7 @@ class IndexedVCD(VCDParser):
             # a damaged directory (bad mode byte, postings past EOF,
             # non-monotonic block ends) must fall back to the plain parser
             # here, never surface as KeyError/struct.error mid-query.
-            if nb * BLOCK.size + HEADER.size > len(self.mapping):
+            if nb * BLOCK.size + HEADER.size > body_end:
                 raise ValueError('truncated block table')
             self.blocks = [BLOCK.unpack_from(
                 self.mapping, HEADER.size + k * BLOCK.size) for k in range(nb)]
@@ -431,7 +470,7 @@ class IndexedVCD(VCDParser):
                 for gid, _bit in refs:
                     self.sources.setdefault(gid, set()).add(sym)
             blob_start = directory_start + ns * DIRECTORY.size
-            if blob_start > len(self.mapping):
+            if blob_start > body_end:
                 raise ValueError('truncated directory')
             for k in range(ns):
                 location, count, flags = DIRECTORY.unpack_from(
@@ -439,7 +478,7 @@ class IndexedVCD(VCDParser):
                 if flags not in ENTRY:
                     raise ValueError('corrupt posting mode')
                 _fmt, esize, _runs = ENTRY[flags]
-                if location < blob_start or location + count * esize > len(self.mapping):
+                if location < blob_start or location + count * esize > body_end:
                     raise ValueError('posting range out of bounds')
         except Exception:
             self.close()
@@ -461,7 +500,7 @@ class IndexedVCD(VCDParser):
     def index_advisable(self):
         """Per-file usage gate; False means 'a plain source scan wins'.
 
-        Two load-time facts decide the regime (PLAN.md §4.1), both O(1):
+        Two load-time facts decide the regime, both O(1):
           data_bytes = file size - data-section start
           bytes of data per raw symbol = data_bytes / raw symbol count
         Header-heavy dumps (formal traces, post-processed collapses) declare
@@ -476,7 +515,7 @@ class IndexedVCD(VCDParser):
         """
         if self._advisable is None:
             data=self.file_size-self.begin_offset
-            self._advisable=(data>=128<<10 and data>=64*len(self.raw_id))
+            self._advisable=_index_pays_off(data,len(self.raw_id))
         return self._advisable
     def _gate_rejects(self):
         return self._enforce_gate and not self.index_advisable()
@@ -689,15 +728,16 @@ class IndexedVCD(VCDParser):
                         val=_clamp_overwide_logic_value(val,info)
                     state[sid]=val
                 continue
-            bits=self._bit_state_template[sid][:]
+            bits=_bus_bytes(self._bit_state_template[sid])
+            top=len(bits)-1
             observed=False
             for sym in self.sources[sid]:
                 if sym in raw:
                     value=raw[sym]
-                    bit=value if len(value)==1 and _is_4state_bits(value) else 'x'
+                    bit=ord(value) if len(value)==1 and _is_4state_bits(value) else 120  # 'x'
                     for gid,index in self._bit_map[sym]:
-                        if gid==sid:bits[index]=bit;observed=True
-            if observed:state[sid]=''.join(reversed(bits))
+                        if gid==sid:bits[top-index]=bit;observed=True
+            if observed:state[sid]=bits.decode('ascii')
         return state
     def state_at(self,t_at,sids=None,pointers=True):
         if self._gate_rejects():
@@ -745,11 +785,14 @@ class IndexedVCD(VCDParser):
         previous=self.fold_raw(raw,sids)
         selected=set(self.signals) if sids is None else sids
         vec_width=self._vec_width
-        bit_state={gid:bits[:] for gid,bits in self._bit_state_template.items() if gid in selected}
+        # MSB-first bytearrays, as in VCDParser._iter_changes: one byte store
+        # per bit write, one C-level decode per committed bus value.
+        bit_state={gid:_bus_bytes(bits) for gid,bits in self._bit_state_template.items() if gid in selected}
+        bit_top={gid:len(state)-1 for gid,state in bit_state.items()}
         for sym,val in raw.items():
-            bit=val if len(val)==1 and _is_4state_bits(val) else 'x'
+            bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
             for gid,index in self._bit_map.get(sym,()):
-                if gid in bit_state:bit_state[gid][index]=bit
+                if gid in bit_state:bit_state[gid][bit_top[gid]-index]=bit
         # Bit-exploded buses commit once per timestamp, matching the 1.5.6
         # parser: bit writes buffer until the tick ends, so cross-bit
         # intermediates never reach the stream; a second write to the SAME
@@ -760,7 +803,7 @@ class IndexedVCD(VCDParser):
         # records themselves (a block may start mid-tick with no marker).
         bus_dirty={}
         def commit_buses():
-            out=[(gid,''.join(reversed(bit_state[gid]))) for gid in bus_dirty]
+            out=[(gid,bit_state[gid].decode('ascii')) for gid in bus_dirty]
             bus_dirty.clear()
             return out
         def emit(records,t):
@@ -784,20 +827,21 @@ class IndexedVCD(VCDParser):
                     cur_t=t
                 if t1 is not None and t>t1:stopped=True;break
                 if t<t0 or sym not in required:continue
-                bit=val if len(val)==1 and _is_4state_bits(val) else 'x'
+                bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
                 records=[]
                 for gid,index in self._bit_map.get(sym,()):
                     if gid in bit_state:
+                        pos=bit_top[gid]-index
                         written=bus_dirty.get(gid)
                         if written is None:
                             bus_dirty[gid]={index}
                         elif index in written:
-                            if bit_state[gid][index]!=bit:
-                                records.append((gid,''.join(reversed(bit_state[gid]))))
+                            if bit_state[gid][pos]!=bit:
+                                records.append((gid,bit_state[gid].decode('ascii')))
                             bus_dirty[gid]={index}
                         else:
                             written.add(index)
-                        bit_state[gid][index]=bit
+                        bit_state[gid][pos]=bit
                 if sym in selected and sym in self.signals:
                     info=self.signals[sym]
                     n=len(val);w=info['width']
@@ -819,7 +863,8 @@ def sidecar_path(vcd_path):
     return str(vcd_path) + '.vcidx'
 
 
-def native_index_build(path, sidecar, block_bytes):
+def native_index_build(path, sidecar, block_bytes, max_index_bytes=None,
+                       max_block_bytes=None):
     """Build via the embedded native library (full variant only).
 
     Fully automatic: the pure-Python builder is the fallback for every
@@ -830,17 +875,37 @@ def native_index_build(path, sidecar, block_bytes):
     build = globals().get('_NATIVE_INDEX_BUILD')
     if build is None:
         return None
-    return build(path, sidecar, block_bytes)
+    built = '{}.native.{}'.format(sidecar, os.getpid())
+    try:
+        stats = build(path, built, block_bytes, max_index_bytes or 0,
+                      max_block_bytes or 0)
+        if stats is None:
+            return None
+        _seal_sidecar(path, built, sidecar)
+    finally:
+        try:
+            os.unlink(built)  # left only when the build or the seal failed
+        except OSError:
+            pass
+    stats['index_bytes'] = os.path.getsize(sidecar)
+    return stats
 
 
-def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
-    """Native build when the running file carries one, pure Python else."""
+def build_index_best(path, sidecar, block_bytes=None, threads=None):
+    """Native build when the running file carries one, pure Python else.
+    block_bytes None picks the block size automatically (AUTO_BLOCK_BYTES,
+    coarsened to index_budget()); an explicit size is used as given."""
     if os.environ.get('VCD_ANALYZER_FAIL_INDEX'):
         raise ValueError('simulated index failure (VCD_ANALYZER_FAIL_INDEX)')
     if threads is not None:
         os.environ['VCD_ANALYZER_INDEX_THREADS'] = str(threads)
+    budget = cap = None
+    if block_bytes is None:
+        block_bytes = AUTO_BLOCK_BYTES
+        budget = index_budget(os.path.getsize(path))
+        cap = AUTO_MAX_BLOCK_BYTES
     try:
-        stats = native_index_build(path, sidecar, block_bytes)
+        stats = native_index_build(path, sidecar, block_bytes, budget, cap)
     except ValueError as error:
         # The native builder is ASCII-only and refuses some exotic tokens;
         # and build-fatal conditions (non-monotonic timestamps) re-raise
@@ -856,7 +921,7 @@ def build_index_best(path, sidecar, block_bytes=8 << 20, threads=None):
         # the native builder, so say so instead of silently ignoring it.
         _warn('VCD_ANALYZER_INDEX_THREADS is ignored: no native builder '
               'is available on this platform', cat='index_threads_hint')
-    stats = build_index(path, sidecar, block_bytes)
+    stats = build_index(path, sidecar, block_bytes, budget, cap)
     stats['builder'] = 'python'
     return stats
 
@@ -877,10 +942,22 @@ def try_index(vcd_path):
     sidecar = sidecar_path(vcd_path)
     if not os.path.exists(sidecar):
         return None
+    # The gate needs only the sidecar header (source size, data start, raw
+    # symbol count): decide it BEFORE IndexedVCD parses the VCD header, or
+    # a header-heavy file the gate rejects pays for that parse twice.
+    try:
+        with open(sidecar, 'rb') as f:
+            head = f.read(HEADER.size)
+        magic, size, _mtime, _bb, _nb, nsym, begin = HEADER.unpack(head)
+    except (OSError, struct.error):
+        pass  # unreadable or truncated: IndexedVCD below reports it
+    else:
+        if magic in (MAGIC, MAGIC2) and not _index_pays_off(size - begin, nsym):
+            return None
     try:
         idx = IndexedVCD(vcd_path, sidecar)
     except (ValueError, OSError, struct.error, KeyError) as error:
-        # struct.error/KeyError: truncated or corrupt sidecar (review P0-2)
+        # struct.error/KeyError: truncated or corrupt sidecar
         _warn('ignoring {} ({})'.format(sidecar, error), cat='index_stale')
         return None
     if not idx.index_advisable():
@@ -893,18 +970,39 @@ def try_index(vcd_path):
 
 _AUTO_SCRIPT_PATH = None  # set by main(): the running single-file script
 
+# Smallest source a query builds an index for in the background. With 1 MiB
+# blocks an indexed point query takes ~0.1-0.3 s at any size, while a plain
+# scan grows with the queried time: ~0.9 s at the end of a typical 10 MB
+# dump, up to ~8 s on a pathological one (a bit-exploded 1024-bit bus); a
+# native build of 10 MB takes well under 0.1 s. Smaller files are left
+# untouched (nothing is written next to them); `index` still builds one on
+# request at any size.
+_AUTO_INDEX_MIN_BYTES = 10 << 20
+
 
 def _sidecar_fresh(vcd_path, sidecar):
-    """True when the sidecar header still matches the source file."""
+    """True when the sidecar header and fingerprint footer still match the
+    source file (the same checks IndexedVCD applies before use)."""
     try:
         with open(sidecar, 'rb') as f:
             head = f.read(24)
-        if len(head) < 24:
-            return False
+            if len(head) < 24:
+                return False
+            f.seek(0, os.SEEK_END)
+            if f.tell() < HEADER.size + FOOTER.size:
+                return False
+            f.seek(-FOOTER.size, os.SEEK_END)
+            footer = f.read(FOOTER.size)
         magic, size, mtime = struct.unpack_from('<8sQQ', head, 0)
-        stat = os.stat(vcd_path)
-        return (magic in (MAGIC, MAGIC2)
-                and size == stat.st_size and mtime == stat.st_mtime_ns)
+        fd = os.open(vcd_path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+        try:
+            stat = os.fstat(fd)
+            if not (magic in (MAGIC, MAGIC2) and size == stat.st_size
+                    and mtime == stat.st_mtime_ns):
+                return False
+            return _footer_mismatch(footer, fd, size) is None
+        finally:
+            os.close(fd)
     except (OSError, struct.error):
         return False
 
@@ -986,11 +1084,13 @@ def _acquire_build_lock(sidecar):
 
 def _build_in_progress(sidecar):
     """True when a builder currently holds the lock (probe with an
-    immediately-released fd; an unopenable lock counts as busy)."""
+    immediately-released fd; an unopenable lock counts as busy). The probe
+    never creates the lock file: no lock file means no builder."""
     lock = sidecar + '.lock'
     try:
-        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, 'O_BINARY', 0),
-                     0o600)
+        fd = os.open(lock, os.O_RDWR | getattr(os, 'O_BINARY', 0))
+    except FileNotFoundError:
+        return False
     except OSError:
         return True
     try:
@@ -1011,25 +1111,34 @@ def maybe_auto_build(parser, vcd_path):
     that looks still-open-for-write (fresh mtime / lsof holder / Windows
     lock) is reported and left alone. Never blocks or fails the query.
 
-    Checks are ordered cheapest-first (review round 4): a fresh sidecar
-    needs nothing, a file below the gate floor can never pass (data <=
-    file size, so size pre-filters without the data_start header rescan),
-    a running builder or a live writer needs no native library — the
+    Checks are ordered cheapest-first: a query already served by the index
+    needs nothing, a file below _AUTO_INDEX_MIN_BYTES gets no NEW sidecar
+    (one stat; an existing stale one is still rebuilt — 1.6.0 auto-built
+    sidecars down to 128 KiB, and they lack the fingerprint now required),
+    a fresh sidecar needs nothing, a running
+    builder or a live writer needs no native library — the
     base85+lzma+dlopen load happens only right before the spawn.
+
+    The builder runs detached with no terminal; it writes <sidecar>.log
+    only when the build fails (see cmd_index --auto).
     """
+    if isinstance(parser, IndexedVCD):
+        return  # the sidecar was fresh and is in use
     if os.environ.get('VCD_ANALYZER_AUTO_INDEX', '1').lower() in ('0', 'false', 'no'):
         return
     if _AUTO_SCRIPT_PATH is None:
         return  # imported as a library: no script to respawn
     vcd_path = os.path.abspath(vcd_path)
     sidecar = sidecar_path(vcd_path)
-    if os.path.exists(sidecar) and _sidecar_fresh(vcd_path, sidecar):
-        return
-    try:
-        if os.path.getsize(vcd_path) < 128 << 10:
-            return  # data <= size: below the gate floor, no header rescan
-    except OSError:
-        return
+    if os.path.exists(sidecar):
+        if _sidecar_fresh(vcd_path, sidecar):
+            return
+    else:
+        try:
+            if os.path.getsize(vcd_path) < _AUTO_INDEX_MIN_BYTES:
+                return
+        except OSError:
+            return
     if _build_in_progress(sidecar):
         return  # a builder is already running for this file
     try:
@@ -1037,7 +1146,7 @@ def maybe_auto_build(parser, vcd_path):
         data = os.path.getsize(vcd_path) - data_start(vcd_path)
     except (OSError, _VCDResourceError):
         return
-    if not (data >= 128 << 10 and data >= 64 * len(symbols)):
+    if not _index_pays_off(data, len(symbols)):
         return  # the gate would refuse it; do not build what we won't use
     held = _writer_holds(vcd_path)
     if held:
@@ -1056,26 +1165,160 @@ def maybe_auto_build(parser, vcd_path):
               'native builder); run the index command to build with the '
               'slower pure-Python mechanism', cat='index_auto_no_native')
         return
-    log = None
     try:
-        try:
-            log = open(sidecar + '.log', 'a')
-        except OSError:
-            log = None
         subprocess.Popen(
             [sys.executable, _AUTO_SCRIPT_PATH, 'index', vcd_path, '--auto'],
-            stdout=log if log is not None else subprocess.DEVNULL,
-            stderr=subprocess.STDOUT if log is not None else subprocess.DEVNULL,
-            start_new_session=True, close_fds=True)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
         _warn('{}: building index in the background '
               '(VCD_ANALYZER_AUTO_INDEX=0 disables)'.format(vcd_path),
               cat='index_autobuild:' + vcd_path)
     except OSError as error:
         _warn('{}: background index build failed to start: {}'.format(
             vcd_path, error), cat='index_autobuild')
+
+
+# Pure-Python builds of sources at least this big carry a note that a
+# native builder would have been much faster.
+_SLOW_BUILD_NOTE_BYTES = 64 << 20
+
+# Returned by a background (--auto) build that found another builder
+# holding the lock: nothing was built, so nothing is logged or cleared.
+_BUILD_BUSY = object()
+
+
+def _build_index_command(vcd, args):
+    """Build the optional .vcidx sidecar for fast random access.
+
+    Explicit by design for interactive use: queries never write (the
+    background auto-builder is the one exception, gated by its own lock).
+    --output stores the sidecar at PATH and links <file>.vcidx to it so
+    queries still find it; a failed link is reported, never fatal. The
+    full variant builds via its embedded native library when one serves
+    the platform, else the pure-Python pass (identical sidecar semantics).
+    """
+    sidecar = sidecar_path(args.file)
+    target = os.path.abspath(args.output) if args.output else sidecar
+    if args.output:
+        # Sidecars are always named *.vcidx — an arbitrary extension would
+        # leave unrecognizable binary files on disk and invite confusion
+        # with the waveform itself.
+        if not target.endswith('.vcidx'):
+            sys.exit('Error: --output must end with .vcidx '
+                     '(e.g. --output {}{})'.format(target, '.vcidx'))
+        # --output pointing at the input VCD would REPLACE the waveform
+        # with the sidecar at publication; --force must not bypass this.
+        if _same_file(target, args.file):
+            sys.exit('Error: --output must not be the VCD file itself')
+    auto = bool(getattr(args, 'auto', False))
+    lock_fd = None
+    if auto:
+        # The background builder holds the OS lock for its own lifetime.
+        # A lost race (another builder grabbed it) exits quietly.
+        lock_fd = _acquire_build_lock(sidecar)
+        if lock_fd is None:
+            return _BUILD_BUSY
+    try:
+        if os.path.exists(target) and not (args.force or auto):
+            sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
+        block_bytes = args.block_mib << 20 if args.block_mib else None
+        try:
+            stats = build_index_best(args.file, target, block_bytes,
+                                     threads=getattr(args, 'threads', None))
+        except (ValueError, _VCDResourceError, struct.error, KeyError) as error:
+            # Builders publish atomically and clean their OWN temp files;
+            # a failed rebuild must leave a pre-existing target untouched.
+            sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+        if args.output:
+            _link_sidecar(sidecar, target)
     finally:
-        if log is not None:
-            log.close()
+        if lock_fd is not None:
+            os.close(lock_fd)  # releases the OS lock; the file is kept
+    builder = stats.get('builder', 'python')
+    start = stats.get('data_start')
+    if start is None:
+        start = data_start(args.file)
+    if not _index_pays_off(stats['source_bytes'] - start, stats['raw_symbols']):
+        _warn('{}: queries will not use this index — the file is too small or '
+              'too declaration-heavy for one to pay off (a plain scan is '
+              'faster)'.format(args.file), cat='index_gate')
+    r = {'file': args.file, 'sidecar': sidecar,
+         'builder': builder,
+         'build_s': round(stats.get('build_s', 0.0), 3),
+         'source_bytes': stats.get('source_bytes'),
+         'index_bytes': stats.get('index_bytes'),
+         'index_pct': round(100.0 * stats.get('index_bytes', 0)
+                            / max(1, stats.get('source_bytes', 1)), 4),
+         'blocks': stats.get('blocks'),
+         'block_bytes': stats.get('block_bytes'),
+         'raw_symbols': stats.get('raw_symbols'),
+         'signal_block_pairs': stats.get('signal_block_pairs'),
+         'threads': stats.get('threads', 1),
+         'parallel_fallback': stats.get('parallel_fallback', False)}
+    if args.json:
+        if builder == 'python' and r['source_bytes'] >= _SLOW_BUILD_NOTE_BYTES:
+            _warn('index built with the slower pure-Python mechanism '
+                  '(no native builder for this platform)', cat='index_slow_build')
+        _json(r)
+        return
+    print('Built    : {}'.format(target))
+    print('Builder  : {}'.format(builder))
+    print('Source   : {:,} bytes'.format(r['source_bytes']))
+    print('Index    : {:,} bytes ({:.4f}%)'.format(r['index_bytes'], r['index_pct']))
+    print('Blocks   : {} x {:g} MiB{}'.format(
+        r['blocks'], r['block_bytes'] / (1 << 20),
+        '' if args.block_mib else ' (automatic)'))
+    print('Symbols  : {} raw, {:,} signal-block pairs'.format(
+        r['raw_symbols'], r['signal_block_pairs']))
+    print('Time     : {:.3f}s'.format(r['build_s']))
+    if builder == 'python' and r['source_bytes'] >= _SLOW_BUILD_NOTE_BYTES:
+        # Full variant, no library for this platform: say so when the file
+        # is big enough for the difference to matter.
+        print('Note     : no native builder for this platform — building with '
+              'the pure-Python index mechanism (much slower). Supported '
+              'platforms build natively with up to 4 threads.')
+    print('Use      : queries pick this up automatically; VCD_ANALYZER_NO_INDEX=1 disables')
+
+def cmd_index(vcd, args):
+    """The `index` command. A background build (--auto, spawned by
+    maybe_auto_build with no terminal attached) keeps its diagnostics in
+    memory and leaves <sidecar>.log behind only when the build fails; a
+    successful build removes the log of an earlier failure."""
+    if not getattr(args, 'auto', False):
+        return _build_index_command(vcd, args)
+    import io
+    import traceback
+    log_path = sidecar_path(args.file) + '.log'
+    captured = io.StringIO()
+    stderr = sys.stderr
+    sys.stderr = captured
+    failure = None
+    try:
+        if _build_index_command(vcd, args) is _BUILD_BUSY:
+            sys.stderr = stderr
+            return  # another builder owns the build (and its log)
+    except SystemExit as stop:
+        if stop.code not in (None, 0):
+            failure = stop.code if isinstance(stop.code, str) \
+                else 'exit status {}'.format(stop.code)
+    except BaseException:
+        failure = traceback.format_exc()
+    finally:
+        sys.stderr = stderr
+    if failure is None:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
+        return
+    try:
+        with open(log_path, 'w', encoding='utf-8') as log:
+            log.write('{} background index build of {} failed\n{}{}\n'.format(
+                time.strftime('%Y-%m-%d %H:%M:%S'), args.file,
+                captured.getvalue(), str(failure).rstrip()))
+    except OSError:
+        pass
+    sys.exit(1)
 
 
 def _link_sidecar(sidecar, target):

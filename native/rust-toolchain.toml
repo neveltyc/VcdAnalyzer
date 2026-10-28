@@ -1,6 +1,6 @@
-# Pinned so every machine — CI and local — builds byte-identical libraries:
-# the CI `native` job rebuilds native/dist/ and fails when the libraries
-# embedded in vcd_analyzer.py differ from that build.
+# Pinned so local builds match the CI `native` job (byte for byte on Linux
+# and Windows; see build_all.sh for macOS). That job rebuilds native/dist/
+# and fails when the libraries embedded in vcd_analyzer.py differ from it.
 [toolchain]
 channel = "1.96.0"
 profile = "minimal"

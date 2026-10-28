@@ -5,26 +5,30 @@
 # cannot be used: rustc drops cdylib for musl targets). Windows uses MinGW
 # (no vcruntime dependency); macOS links through zig's bundled SDK stubs.
 #
-# Toolchain (pinned so local builds match the CI `native` job byte for
-# byte): Rust from rust-toolchain.toml (rustup installs it and the targets
-# on first use), zig $ZIG_VERSION (`pip install ziglang==$ZIG_VERSION`
-# provides it as `python3 -m ziglang`), cargo-zigbuild $ZIGBUILD_VERSION.
-# The canonical libraries are the CI build: download its `native-dist`
-# artifact into native/dist/ when a local build differs.
+# Toolchain (pinned so local builds match the CI `native` job): Rust from
+# rust-toolchain.toml (rustup installs it and the targets on first use),
+# zig $ZIG_VERSION (`pip install ziglang==$ZIG_VERSION`), cargo-zigbuild
+# $ZIGBUILD_VERSION (`pip install cargo-zigbuild==$ZIGBUILD_VERSION`).
+# cargo-zigbuild may run the pip ziglang (`python3 -m ziglang`) rather than
+# a `zig` on PATH, so both are checked.
+#
+# The libraries embedded in vcd_analyzer.py are the CI build: download the
+# `native-dist` artifact of the CI `native` job into native/dist/ and run
+# `python _make.py`. Local builds with the pinned toolchain match it byte
+# for byte on Linux and Windows; the macOS library differs in its LC_UUID
+# (and the ad-hoc signature hashes over it), which zig's linker derives
+# from machine-specific input paths.
 set -e
 ZIG_VERSION=0.16.0
 ZIGBUILD_VERSION=0.24.0
 cd "$(dirname "$0")"
 export PATH="$HOME/.cargo/bin:$PATH"
-if command -v zig >/dev/null 2>&1; then
-  zig_found=$(zig version)
-else
-  zig_found=$(python3 -m ziglang version 2>/dev/null || echo none)
-fi
-if [ "$zig_found" != "$ZIG_VERSION" ]; then
-  echo "warning: zig $zig_found found, $ZIG_VERSION pinned — the libraries will not match CI" >&2
-fi
-zigbuild_found=$(cargo zigbuild --version 2>/dev/null | awk '{print $2}')
+for zig_found in "$(zig version 2>/dev/null)" "$(python3 -m ziglang version 2>/dev/null)"; do
+  if [ -n "$zig_found" ] && [ "$zig_found" != "$ZIG_VERSION" ]; then
+    echo "warning: zig $zig_found found, $ZIG_VERSION pinned — the libraries will not match CI" >&2
+  fi
+done
+zigbuild_found=$(cargo-zigbuild --version 2>/dev/null | awk '{print $2}')
 if [ "$zigbuild_found" != "$ZIGBUILD_VERSION" ]; then
   echo "warning: cargo-zigbuild ${zigbuild_found:-none} found, $ZIGBUILD_VERSION pinned" >&2
 fi

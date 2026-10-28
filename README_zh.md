@@ -236,7 +236,7 @@ CI 会拒绝发行文件与 `src/` 不一致的提交，并在每次 push 时跑
 只有 `_preamble.py` 可以包含模块级 import——各部分共享同一个命名空间。
 
 没有 `native/dist/` 时，`_make.py` 会复用 `vcd_analyzer.py` 中已内嵌的库，
-因此只改 Python 不需要 Rust 工具链。原生库用锁定的工具链可复现地构建
+因此只改 Python 不需要 Rust 工具链。原生库用锁定的工具链构建
 （Rust 1.96.0 见 `native/rust-toolchain.toml`，zig 0.16.0，cargo-zigbuild 0.24.0）：
 
 ```bash
@@ -246,8 +246,10 @@ python _make.py                               # 嵌入
 python _make.py --check-native native/dist    # 内嵌库是否等于本次构建？
 ```
 
-CI 的 `native` 任务每次 push 都做同样的构建，内嵌库与之不一致即失败；
-修改 `native/` 后，以它上传的 `native-dist` 产物为准嵌入。
+CI 的 `native` 任务每次 push 都做同样的构建，内嵌库与之不一致即失败。
+修改 `native/` 后，以它上传的 `native-dist` 产物为准嵌入（解压到 `native/dist/`，
+再运行 `python _make.py`）：用锁定工具链在本地构建的 Linux 和 Windows 库与它逐字节
+一致；macOS 库的 `LC_UUID` 会不同——zig 的链接器会把机器相关的输入路径算进去。
 
 ## 测试
 

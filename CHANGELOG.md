@@ -25,9 +25,9 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
   a few small reads per query. Sidecars written by 1.6.0 are treated as stale and rebuilt.
 - A background build writes `<file>.vcidx.log` only when it fails and removes it after a later success; queries
   no longer create `<file>.vcidx.lock`.
-- Native libraries are built reproducibly with a pinned toolchain (Rust 1.96.0, zig 0.16.0, cargo-zigbuild
-  0.24.0); CI rebuilds them and rejects a release file whose embedded libraries differ. The macOS library no
-  longer records the build machine's path. `_make.py --check` verifies the full file byte-exactly; without
+- Native libraries are built in CI with a pinned toolchain (Rust 1.96.0, zig 0.16.0, cargo-zigbuild 0.24.0);
+  the CI `native` job rejects a release file whose embedded libraries differ from its build, and its artifact
+  is what gets embedded. The macOS library no longer records the build machine's path. `_make.py --check` verifies the full file byte-exactly; without
   `native/dist/` the full build reuses the embedded libraries.
 - The lite build no longer imports the index engine's modules.
 

@@ -274,7 +274,7 @@ rejects a drifted release file, and CI enforces it.
 
 Without `native/dist/`, `_make.py` reuses the libraries already embedded in
 `vcd_analyzer.py`, so Python-only changes need no Rust toolchain. The native
-libraries are built reproducibly with a pinned toolchain (Rust 1.96.0 from
+libraries are built with a pinned toolchain (Rust 1.96.0 from
 `native/rust-toolchain.toml`, zig 0.16.0, cargo-zigbuild 0.24.0):
 
 ```bash
@@ -285,8 +285,11 @@ python _make.py --check-native native/dist    # embedded == this build?
 ```
 
 CI's `native` job runs the same build on every push and fails when the
-embedded libraries differ from it; its `native-dist` artifact is the
-canonical build to embed after changing `native/`.
+embedded libraries differ from it. Its `native-dist` artifact is the build
+to embed after changing `native/` (unzip it into `native/dist/`, then
+`python _make.py`): a local build with the pinned toolchain matches it byte
+for byte on Linux and Windows, while the macOS library differs in its
+`LC_UUID`, which zig's linker derives from machine-specific input paths.
 
 ## Tests
 

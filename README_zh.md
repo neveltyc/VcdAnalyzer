@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.6.0-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.6.1-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.8+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
@@ -78,10 +78,10 @@ python vcd_analyzer.py index sim.vcd
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
 
 # 精简版（纯 Python，无索引功能）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
 
 python vcd_analyzer.py --version
 ```
@@ -124,8 +124,8 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
   字节数、路径；`--json` 下为 JSON 对象）——保存大波形的完整 dump、或交给 Agent
   读取时用它。
 - **管道或重定向**（`| grep`、`| less`、`> file`）照常全部流出。
-- **终端** 只显示前 1 MiB，然后停止并给出提示：大波形的完整 dump 动辄几百 MB，
-  在屏幕上没人看得完。
+- **终端** 只显示前 1 MiB，然后停止并给出提示，退出码为 3：大波形的完整 dump
+  动辄几百 MB，在屏幕上没人看得完。
 
 ```bash
 python vcd_analyzer.py --limit 0 dump sim.vcd --filter 'u_dma.*' -o dma_changes.txt
@@ -146,7 +146,7 @@ python vcd_analyzer.py --limit 0 dump sim.vcd --filter 'u_dma.*' -o dma_changes.
 - **块大小自动选择。** 点查询要重新解析它所在的索引块，块越小查询越快（1 MiB
   块约 0.1–0.2 秒）；而索引大小随"在块内有变化的（信号, 块）对"增长。构建从
   1 MiB 开始，只有索引超过 dump 的 2% 时才合并相邻块——常见 dump 保持 1 MiB
-  （索引约 0.2%）；成千上万个信号处处活跃的宽设计会逐级放大块直到满足预算。
+  （索引约 0.2%）；成千上万个信号处处活跃的宽设计会逐级放大块直到满足预算，最大 8 MiB。
   `index --block-mib N` 可强制指定。
 - **新鲜度 = `(文件大小, 纳秒级 mtime)` + 内容指纹**：头部记录大小与 mtime，
   尾部对源文件均匀分布的 8 个 4 KiB 采样（含文件头与文件尾）做哈希，因此

@@ -12,12 +12,17 @@ Commands:
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
   search     <file> --condition C [--condition C ...] [--show K1,K2] [--begin T] [--end T]
                                                         Conditional search and associated signal observation
+  index      <file> [--block-mib N] [--force] [--output PATH]
+                                                        Build the optional .vcidx sidecar (full variant)
 
 Global options:
   --json       Output compact structured JSON instead of text (time fields include *_ticks)
   --limit N    Max rows/records to emit; default 500; 0 = unlimited.
                Streaming commands stop after detecting the first unshown result.
   --verbose    Show extra fields; if --limit is omitted, disables truncation
+  -o FILE      (query commands) Write the result to FILE; stdout gets a one-line receipt.
+               On an interactive terminal, stdout output stops after 1 MiB (exit status 3);
+               pipes and redirects receive everything.
 
 Argument formats:
   <file>          VCD file path
@@ -91,7 +96,7 @@ Notes:
   since coincidence is a property of the tick rather than of any one record.
 """
 
-__version__ = '1.6.0'
+__version__ = '1.6.1'
 
 import sys
 import os

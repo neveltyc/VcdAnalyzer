@@ -14,8 +14,8 @@ All commands support `--json` for structured output. **Always use `--json` when 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.0
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.1
 ```
 
 No pip install, no virtualenv, no dependencies. Python 3.8+. (A
@@ -154,8 +154,8 @@ skipped with a message while the dump still looks open for writing. A sidecar
 whose source changed (size, mtime or sampled content) is ignored and rebuilt.
 A failed background build leaves `<file>.vcidx.log`. Key JSON fields:
 `builder`, `index_bytes`, `blocks`, `block_bytes`, `build_s`. Leave `--block-mib` unset:
-the block size is chosen automatically (1 MiB, larger only when the index would
-exceed 2% of the dump).
+the block size is chosen automatically (1 MiB, larger — up to 8 MiB — only when
+the index would exceed 2% of the dump).
 
 ### 8. search — condition-based query (three modes)
 
@@ -314,7 +314,7 @@ Unlimited `dump` JSON and `search` output spool result rows to temporary files; 
 python3 vcd_analyzer.py --json --limit 0 dump sim.vcd --filter 'u_dma.*' -o /tmp/dma.json
 ```
 
-A terminal shows at most 1 MiB of output (then `>> OUTPUT CUT`); pipes and redirects are not capped.
+A terminal shows at most 1 MiB of output (then `>> OUTPUT CUT` and exit status 3); pipes and redirects are not capped.
 
 ### Time fields in JSON
 

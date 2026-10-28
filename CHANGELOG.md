@@ -3,7 +3,7 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
-## Unreleased
+## [1.6.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.1) - 2026-10-28
 
 ### Added
 
@@ -13,46 +13,42 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
 ### Changed
 
 - Output to an interactive terminal stops after 1 MiB with an `>> OUTPUT CUT` notice pointing to `--output` or a
-  pipe; pipes and redirects still receive everything. A `--limit 0 dump` of a big waveform is hundreds of MB.
-
-- Automatic background index builds start only for sources of 10 MiB or more (was 128 KiB): below that a plain
-  scan answers in seconds and a query never writes next to the dump. `index` still builds at any size.
-- The index block size is automatic (was a fixed 8 MiB): builds start at 1 MiB blocks and merge neighbouring
-  blocks only while the sidecar would exceed 2% of the source. Indexed point queries drop from ~0.6-1.2 s to
-  ~0.1-0.2 s on typical dumps (index ~0.2% of the source); wide designs with thousands of signals active in every
-  block coarsen until they fit. Both builders apply the same policy; `index --block-mib N` still forces a size and
-  `index` reports the size used (JSON `block_bytes`).
-- Sidecar freshness adds a content fingerprint to `(size, mtime_ns)`: a footer hashes eight 4 KiB samples spread
-  over the source, so a different dump with the same size and a preserved mtime (`cp -p`, `rsync -t`, tar) is
-  detected at the cost of a few small reads per query. Sidecars written by 1.6.0 are treated as stale and rebuilt.
-- A background build writes `<file>.vcidx.log` only when it fails and removes it after a later success; queries no
-  longer create `<file>.vcidx.lock` (only a running build does).
-- The native libraries are built reproducibly with a pinned toolchain (Rust 1.96.0, zig 0.16.0, cargo-zigbuild
-  0.24.0); CI rebuilds them and rejects a release file whose embedded libraries differ. The macOS library no longer
-  records the build machine's path.
-- `_make.py --check` verifies the full file byte-exactly, embedded libraries included; without `native/dist/` the
-  full build reuses the embedded libraries, so Python-only changes need no Rust toolchain.
+  pipe, and exit status 3; pipes and redirects still receive everything.
+- Index block size is automatic (was a fixed 8 MiB): builds start at 1 MiB blocks and merge neighbouring blocks
+  only while the sidecar would exceed 2% of the source, up to 8 MiB. Indexed point queries drop from ~0.6-1.2 s to
+  ~0.1-0.3 s on typical dumps (index ~0.2% of the source); designs with thousands of signals active in every block
+  coarsen. Both builders share the policy; `index --block-mib N` forces a size; `index` reports it (`block_bytes`).
+- Automatic background index builds start at 10 MiB (was 128 KiB): smaller dumps get no new sidecar, while an
+  existing stale one is still rebuilt. `index` builds at any size and warns when queries will not use the result.
+- Sidecar freshness adds a content fingerprint to `(size, mtime_ns)`: a footer hashes eight 4 KiB samples of the
+  source, so a different dump with the same size and a preserved mtime (`cp -p`, `rsync -t`, tar) is detected for
+  a few small reads per query. Sidecars written by 1.6.0 are treated as stale and rebuilt.
+- A background build writes `<file>.vcidx.log` only when it fails and removes it after a later success; queries
+  no longer create `<file>.vcidx.lock`.
+- Native libraries are built reproducibly with a pinned toolchain (Rust 1.96.0, zig 0.16.0, cargo-zigbuild
+  0.24.0); CI rebuilds them and rejects a release file whose embedded libraries differ. The macOS library no
+  longer records the build machine's path. `_make.py --check` verifies the full file byte-exactly; without
+  `native/dist/` the full build reuses the embedded libraries.
 - The lite build no longer imports the index engine's modules.
 
 ### Fixed
 
-- Bit-exploded buses no longer cost O(width) Python work per tick: each bus value is a byte string updated
-  in place and decoded once per tick. On a bit-exploded 1024-bit bus changing one bit per tick, 10 MB took
-  ~8 s for `snapshot`, `compare` and `summary` and now takes ~1.8 s (both variants); `snapshot`/`compare`
-  time no longer depends on the bus width.
-- `summary` keys distinct values longer than 32 characters by (length, hash) instead of keeping the value:
-  a 1 MB dump of a bit-exploded 16384-bit bus used 612 MB and 6.5 s, now 41 MB and ~0.5 s. A hash
-  collision (~1e-10 within the 65536-value cap) would undercount `unique` by one.
-- Vector values whose decimal form exceeds Python's integer-to-string digit limit (4300 digits by default on
-  3.11+ and on the 3.8.14+/3.9.14+/3.10.7+ security releases, none before, `PYTHONINTMAXSTRDIGITS` otherwise) were
-  printed in binary instead of `decimal (0xhex)`, so the format of a wide vector depended on its value, the Python
-  patch level and the environment. Wide values now always print `decimal (0xhex)`, computed with the `decimal`
-  module above 2048 bits.
-- A sidecar the usage gate rejects (declaration-heavy or tiny dumps) is turned down from its own header instead
-  of after a full VCD header parse, which made every query on such a file parse the header twice (~2x slower);
-  `index` now warns when it builds a sidecar queries will not use.
+- Bit-exploded buses cost O(width) Python work per tick. A 10 MB dump of a bit-exploded 1024-bit bus changing one
+  bit per tick took ~8 s for `snapshot`, `compare` and `summary`, now ~1.8 s; `snapshot`/`compare` no longer depend
+  on the bus width.
+- `summary` kept every distinct value of a wide signal alive: a 1 MB dump of a bit-exploded 16384-bit bus used
+  612 MB and 6.5 s, now 41 MB and ~0.5 s. Values over 32 characters are counted by (length, hash); a collision
+  (~1e-10 within the 65536-value cap) would undercount `unique` by one.
+- Vectors whose decimal form exceeds Python's integer-to-string digit limit (4300 digits by default on 3.11+ and
+  the 3.8.14+/3.9.14+/3.10.7+ security releases, none before, `PYTHONINTMAXSTRDIGITS` otherwise) printed in binary,
+  so a wide vector's format depended on its value, the Python patch level and the environment. They now always
+  print `decimal (0xhex)`.
+- An index the usage gate rejects (declaration-heavy or tiny dumps) made every query parse the VCD header twice;
+  the gate is now decided from the sidecar's own header.
 - `vcd_analyzer_lite.py index --auto` crashed with a NameError, and `index` with an existing sidecar answered
   "already exists" instead of pointing to the full build.
+
+Validation: 333 tests pass on Python 3.8, 3.11, 3.12 and 3.13 (Linux).
 
 ## [1.6.0](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.0) - 2026-10-25
 

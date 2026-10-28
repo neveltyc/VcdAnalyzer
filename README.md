@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.6.0-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.6.1-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.8+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
@@ -82,10 +82,10 @@ Two single files, no dependencies, Python 3.8+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
 
 # Lite (pure Python, no index feature)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
 
 python vcd_analyzer.py --version
 ```
@@ -129,8 +129,9 @@ unlimited result goes is up to you:
   one-line receipt (lines, bytes, path; a JSON object under `--json`) — the
   way to keep a full dump of a big waveform, or to hand one to an agent.
 - **A pipe or redirect** (`| grep`, `| less`, `> file`) streams everything.
-- **A terminal** shows the first 1 MiB and then stops with a notice: a full
-  dump of a big waveform is hundreds of MB nobody reads on screen.
+- **A terminal** shows the first 1 MiB and then stops with a notice and exit
+  status 3: a full dump of a big waveform is hundreds of MB nobody reads on
+  screen.
 
 ```bash
 python vcd_analyzer.py --limit 0 dump sim.vcd --filter 'u_dma.*' -o dma_changes.txt
@@ -155,7 +156,7 @@ and on every Python version.
   Builds start at 1 MiB and merge neighbouring blocks only while the index
   would exceed 2% of the dump — typical dumps stay at 1 MiB (~0.2% index);
   wide designs with thousands of signals active everywhere coarsen until
-  they fit. `index --block-mib N` forces a size.
+  they fit, up to 8 MiB. `index --block-mib N` forces a size.
 - **Freshness is `(size, mtime_ns)` plus a content fingerprint** — the
   header records size and mtime, and a footer hashes eight 4 KiB samples
   spread over the source (header and tail included), so a different dump

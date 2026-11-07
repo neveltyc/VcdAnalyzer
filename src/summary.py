@@ -2,6 +2,22 @@
 # Part 7: Window summary
 # ================================================================
 
+def _unique_key(val):
+    """Distinct-value key for summary's `unique` count. Values up to 32
+    characters are kept as-is; longer ones (wide buses) by (length, hash),
+    so each set entry stays small instead of holding the value: a
+    bit-exploded 16384-bit bus with a fresh value every tick otherwise kept
+    ~600 MB of strings alive for a 1 MB file. hash() is the string hash the
+    set would compute anyway (no extra pass over the value, unlike a
+    cryptographic digest, which cost ~5 us per 8 KiB value per tick). A
+    collision among the at most VCD_ANALYZER_MAX_UNIQUE_VALUES keys is
+    ~1e-10 likely and would undercount by one; a tuple never equals a
+    short value (str)."""
+    if len(val) <= 32:
+        return val
+    return len(val), hash(val)
+
+
 def _summary_rows(vcd, t0, t1, sids):
     """Return (rows, undefined, counts) for window summary.
 
@@ -49,7 +65,7 @@ def _summary_rows(vcd, t0, t1, sids):
         return {
             'changes': 0, 'first_at': None, 'last_at': None,
             'initial': init_val, 'last': init_val,
-            'unique': {init_val} if init_val is not None else set(),
+            'unique': {_unique_key(init_val)} if init_val is not None else set(),
             'unique_capped': False,
             'rise_count': 0 if is_scalar else None,
             'fall_count': 0 if is_scalar else None,
@@ -97,9 +113,10 @@ def _summary_rows(vcd, t0, t1, sids):
             # Once capped the set is frozen, so skip the per-value hash
             # entirely — this is the exact tens-of-millions hot path the cap
             # exists for.
-            if not s['unique_capped'] and val not in s['unique']:
+            key = None if s['unique_capped'] else _unique_key(val)
+            if key is not None and key not in s['unique']:
                 if len(s['unique']) < unique_cap:
-                    s['unique'].add(val)
+                    s['unique'].add(key)
                 else:
                     # At cap: the count stays a lower bound, flagged on the row.
                     s['unique_capped'] = True

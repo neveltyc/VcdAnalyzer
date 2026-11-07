@@ -46,6 +46,162 @@ def _json(obj):
     print(json.dumps(obj, ensure_ascii=False, separators=(',', ':')))
 
 
+# -- where results go -----------------------------------------------------
+#
+# A query writes its result to stdout. Three destinations, three policies:
+#   * --output FILE: the whole result goes to FILE (published atomically),
+#     stdout gets a one-line receipt — the way to keep an unlimited dump.
+#   * a pipe or a redirect: everything is streamed; the caller chose where
+#     it goes (| grep, | less, > file).
+#   * an interactive terminal: output stops after _TERMINAL_BUDGET with a
+#     notice. A `--limit 0 dump` of a big dump is hundreds of MB that
+#     nobody reads on a terminal and that takes minutes to scroll past.
+
+_TERMINAL_BUDGET = 1 << 20
+_EXIT_OUTPUT_CUT = 3
+
+
+class _OutputPathError(Exception):
+    """--output cannot be written (reported as a CLI error, not as an
+    unreadable VCD)."""
+
+
+class _OutputBudgetExceeded(Exception):
+    """Raised through the command when the terminal budget is spent."""
+
+
+class _TerminalBudget:
+    """stdout proxy for an interactive terminal: passes text through until
+    _TERMINAL_BUDGET characters, ends on the last whole line within it,
+    then stops the command. (print() writes a line and its newline
+    separately, so a write may hold no newline at all; the cut then falls
+    after the previous write. Only output that has no line break within the
+    whole budget — one huge JSON line — is shown cut mid-line.)"""
+
+    def __init__(self, stream, budget):
+        self._stream = stream
+        self._budget = self._left = budget
+
+    def write(self, text):
+        if len(text) <= self._left:
+            self._left -= len(text)
+            return self._stream.write(text)
+        head = text[:self._left]
+        cut = head.rfind('\n')
+        if cut >= 0:
+            self._stream.write(head[:cut + 1])
+        elif self._left == self._budget:
+            self._stream.write(head)
+        self._left = 0
+        raise _OutputBudgetExceeded()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+class _CountingSink:
+    """File proxy that counts the lines written through it."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.lines = 0
+
+    def write(self, text):
+        self.lines += text.count('\n')
+        return self._stream.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _same_file(path, other):
+    """True when path names the same file as other (also via links)."""
+    return (os.path.realpath(path) == os.path.realpath(other)
+            or (os.path.exists(path) and os.path.exists(other)
+                and os.path.samefile(path, other)))
+
+
+def _is_terminal(stream):
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _run_command(command, vcd, args):
+    """Run a query command against the destination its output should go to."""
+    target = getattr(args, 'output_file', None)
+    if target:
+        return _run_to_file(command, vcd, args, target)
+    stdout = sys.stdout
+    if not _is_terminal(stdout):
+        return command(vcd, args)
+    sys.stdout = _TerminalBudget(stdout, _TERMINAL_BUDGET)
+    try:
+        command(vcd, args)
+    except _OutputBudgetExceeded:
+        sys.stdout = stdout
+        stdout.flush()
+        sys.stderr.write(
+            '\n>> OUTPUT CUT: {} MiB shown on the terminal. Write the whole result to a file '
+            'with --output FILE, or pipe it (| less, | grep, > file).\n'.format(
+                _TERMINAL_BUDGET >> 20))
+        # A distinct status, so a script driving a pseudo-terminal can tell
+        # a cut result (possibly a half JSON document) from a complete one.
+        sys.exit(_EXIT_OUTPUT_CUT)
+    finally:
+        sys.stdout = stdout
+
+
+def _run_to_file(command, vcd, args, target):
+    """Write the command's stdout to target (via a temp file in the same
+    directory, renamed on success), then print a receipt on stdout."""
+    target = os.path.abspath(target)
+    if _same_file(target, args.file):
+        raise _OutputPathError('--output must not be the VCD file itself')
+    if os.path.isdir(target):
+        raise _OutputPathError('cannot write --output {}: it is a directory'.format(target))
+    # Created like a shell redirect would (mode 0666 minus the umask), not
+    # with mkstemp's private 0600: the result is the user's file.
+    temp = '{}.{}.part'.format(target, os.getpid())
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except OSError as error:
+        raise _OutputPathError('cannot write --output {}: {}'.format(
+            target, error.strerror or error))
+    stdout = sys.stdout
+    published = False
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as sink:
+            counted = _CountingSink(sink)
+            sys.stdout = counted
+            try:
+                command(vcd, args)
+            except SystemExit as stop:
+                if stop.code not in (None, 0):
+                    raise
+            finally:
+                sys.stdout = stdout
+        try:
+            os.replace(temp, target)
+        except OSError as error:
+            raise _OutputPathError('cannot write --output {}: {}'.format(
+                target, error.strerror or error))
+        published = True
+    finally:
+        if not published:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+    size = os.path.getsize(target)
+    if getattr(args, 'json', False):
+        print(json.dumps({'output': target, 'bytes': size, 'lines': counted.lines},
+                         ensure_ascii=False, separators=(',', ':')))
+    else:
+        print('Wrote {:,} lines ({:,} bytes) to {}'.format(counted.lines, size, target))
+
+
 def _limit(args):
     """Resolve global output limit. --verbose disables truncation unless an
     explicit --limit was supplied. --limit 0 always means unlimited."""

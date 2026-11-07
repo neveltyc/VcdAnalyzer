@@ -38,3 +38,17 @@ def test_summary_window_counts_match_search(tmp_path, capsys):
     for sig in ('ev', 'late', 'a'):
         assert rows['tb.' + sig]['changes'] == _search_count(
             capsys, v, 'tb.' + sig, begin='5', end='15'), sig
+
+
+def test_unique_count_for_long_values(tmp_path):
+    """Values longer than 32 characters are counted by digest: repeats are
+    still one value, distinct ones still distinct."""
+    a, b, c = '1' * 64, '10' * 32, '0' * 63 + '1'
+    p = write_vcd(tmp_path, minimal_vcd(
+        '$var wire 64 ! v [63:0] $end\n',
+        '#0\nb0 !\n#1\nb{a} !\n#2\nb{b} !\n#3\nb{a} !\n#4\nb{c} !\n#5\nb{b} !\n'.format(
+            a=a, b=b, c=c)))
+    v = va.VCDParser(str(p))
+    rows, _undefined, _counts = va._summary_rows(v, 0, None, None)
+    assert rows[0]['changes'] == 5
+    assert rows[0]['unique'] == 4  # 0, a, b, c

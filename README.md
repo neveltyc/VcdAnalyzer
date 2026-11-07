@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.6.0-3366cc?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.6.1-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.8+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
@@ -82,10 +82,10 @@ Two single files, no dependencies, Python 3.8+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
 
 # Lite (pure Python, no index feature)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.0/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
 
 python vcd_analyzer.py --version
 ```
@@ -120,19 +120,56 @@ python vcd_analyzer.py --json info sim.vcd
 python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 ```
 
+## Large results
+
+Results are capped at 500 rows by default; `--limit 0` lifts the cap. Where an
+unlimited result goes is up to you:
+
+- **`--output FILE`** (`-o`) writes the whole result to FILE and prints a
+  one-line receipt (lines, bytes, path; a JSON object under `--json`) — the
+  way to keep a full dump of a big waveform, or to hand one to an agent.
+- **A pipe or redirect** (`| grep`, `| less`, `> file`) streams everything.
+- **A terminal** shows the first 1 MiB and then stops with a notice and exit
+  status 3: a full dump of a big waveform is hundreds of MB nobody reads on
+  screen.
+
+```bash
+python vcd_analyzer.py --limit 0 dump sim.vcd --filter 'u_dma.*' -o dma_changes.txt
+```
+
+Fully known vector values always print as `decimal (0xhex)`, at any width
+and on every Python version.
+
 ## The index sidecar (full variant)
 
 - **Explicit or automatic.** `vcd_analyzer.py index sim.vcd` builds `sim.vcd.vcidx`
   (a fraction of a percent of the source; seconds for a 10 GB dump). Or do
-  nothing: the first query on a big unindexed dump starts a background build —
-  the next query is fast.
+  nothing: the first query on an unindexed dump of 10 MiB or more starts a
+  background build — the next query is fast. Smaller files are never touched
+  automatically (a plain scan answers them in seconds); `index` builds one
+  for any size on request.
 - **Queries use it automatically** whenever the sidecar is fresh; output is
   identical, only faster (minutes-long point lookups become sub-second).
-- **Freshness is `(size, mtime_ns)`** recorded in the sidecar header — O(1) per
-  query, no content hashing. A stale sidecar warns once and the plain parser
-  answers; an automatic rebuild is skipped (with a message) while the source
-  looks still-open-for-write (mtime < 5 s, an `lsof` holder, or a Windows
-  sharing violation).
+- **Block size is automatic.** A point query re-parses the indexed block it
+  lands in, so small blocks keep queries fast (~0.1-0.2 s with 1 MiB blocks),
+  while the index grows with every (signal, block) pair that saw a change.
+  Builds start at 1 MiB and merge neighbouring blocks only while the index
+  would exceed 2% of the dump — typical dumps stay at 1 MiB (~0.2% index);
+  wide designs with thousands of signals active everywhere coarsen until
+  they fit, up to 8 MiB. `index --block-mib N` forces a size.
+- **Freshness is `(size, mtime_ns)` plus a content fingerprint** — the
+  header records size and mtime, and a footer hashes eight 4 KiB samples
+  spread over the source (header and tail included), so a different dump
+  copied in with the same size and a preserved mtime (`cp -p`, `rsync -t`,
+  tar) is caught too. The check costs a few small reads per query whatever
+  the file size. A stale sidecar warns once and the plain parser answers;
+  an automatic rebuild is skipped (with a message) while the source looks
+  still-open-for-write (mtime < 5 s, an `lsof` holder, or a Windows sharing
+  violation). Sidecars written by 1.6.0 carry no fingerprint and are rebuilt.
+- **Files next to the dump.** Besides `<file>.vcidx`, a background build
+  keeps a few-byte `<file>.vcidx.lock` (its single-flight lock) and writes
+  `<file>.vcidx.log` only when it fails; a later successful build removes
+  the log.
 - On platforms without an embedded native builder, automatic builds are off
   by default (they would only run the much slower pure-Python pass) — the
   `index` command still works there and says which mechanism it used.
@@ -192,8 +229,12 @@ python vcd_analyzer.py --json search sim.vcd --condition "state=5" --show data
 
 ## Single file, zero dependencies
 
-`vcd_analyzer.py` is pure Python with no third-party imports. No pip install, no virtualenv
-ritual &mdash; drop it anywhere with Python 3.8+ and it works.
+Both files are single files with no third-party Python dependencies. The full
+`vcd_analyzer.py` additionally embeds compressed native index-builder libraries,
+loaded through a C ABI and checksum-verified, and falls back to pure Python
+when none matches the platform; `vcd_analyzer_lite.py` is pure Python only.
+No pip install, no virtualenv ritual &mdash; drop it anywhere with Python 3.8+
+and it works.
 
 ## Project layout
 
@@ -206,7 +247,7 @@ native/               Rust index-builder crate + cross-build script (cargo-zigbu
 verify/               pytest + unittest test suite
 verify/fixtures/      Sanitized VCD waveforms (no private paths)
 verify/samples/       Real-world GitHub VCD fixtures for smoke testing
-.github/workflows/    CI: both release files must match src/, tests on 3.8-3.13
+.github/workflows/    CI: release files match src/, native libraries match a fresh build, tests on 3.8-3.13
 CHANGELOG.md          Compact changelog with links to detailed release notes
 ```
 
@@ -231,11 +272,31 @@ differs: the lite build carries an explicit stub that errors clearly on
 anything index-related) and can never diverge silently — `_make.py --check`
 rejects a drifted release file, and CI enforces it.
 
+Without `native/dist/`, `_make.py` reuses the libraries already embedded in
+`vcd_analyzer.py`, so Python-only changes need no Rust toolchain. The native
+libraries are built with a pinned toolchain (Rust 1.96.0 from
+`native/rust-toolchain.toml`, zig 0.16.0, cargo-zigbuild 0.24.0):
+
+```bash
+pip install ziglang==0.16.0 cargo-zigbuild==0.24.0
+sh native/build_all.sh                        # -> native/dist/
+python _make.py                               # embed them
+python _make.py --check-native native/dist    # embedded == this build?
+```
+
+CI's `native` job runs the same build on every push and fails when the
+embedded libraries differ from it. Its `native-dist` artifact is the build
+to embed after changing `native/` (unzip it into `native/dist/`, then
+`python _make.py`). Builds with the pinned toolchain are byte-identical
+everywhere, except that zig's Mach-O linker gives the macOS library a fresh
+`LC_UUID` on every build; `--check-native` compares it with that UUID and
+the code signature over it excluded.
+
 ## Tests
 
 ```bash
-# Full pytest suite (requires pytest)
-python -m pytest verify/ -v
+# Full pytest suite (requires pytest; pytest-xdist's -n auto runs it in parallel)
+python -m pytest verify/ -q -n auto
 
 # unittest only (stdlib, no extra installs)
 python -m unittest discover -s verify -p "test_cli.py"

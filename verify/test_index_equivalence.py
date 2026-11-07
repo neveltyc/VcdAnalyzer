@@ -237,6 +237,44 @@ def test_corpus_native_built_equivalence(tmp_path):
     assert total > 300
 
 
+def _coarsening_budget(path, sidecar):
+    """A budget that forces at least one pairwise block merge: the fixed
+    part plus a quarter of the postings a fine build produced."""
+    stats = va.build_index(path, sidecar, 17)
+    fixed = va._sidecar_bytes(stats['blocks'], stats['raw_symbols'], 0)
+    return stats, fixed + (stats['index_bytes'] - fixed) // 4
+
+
+@pytest.mark.parametrize('builder', ['python', 'native'])
+def test_corpus_coarsened_equivalence(tmp_path, builder):
+    """Blocks merged to meet an index budget (the automatic block size)
+    answer exactly like the plain parser, for both builders."""
+    total = coarsened = 0
+    for name, text in CORPUS.items():
+        path = _write(tmp_path, name, text)
+        raw = va.VCDParser(str(path))
+        fine, budget = _coarsening_budget(path, tmp_path / 'fine.idx')
+        sidecar = tmp_path / 'c.idx'
+        if builder == 'python':
+            stats = va.build_index(path, sidecar, 17, max_index_bytes=budget)
+        else:
+            stats = va.native_index_build(str(path), str(sidecar), 17, budget)
+            if stats is None:
+                pytest.skip('no native builder on this platform')
+        if fine['blocks'] > 1:
+            assert stats['coarsens'] >= 1, name
+            assert stats['block_bytes'] == 17 << stats['coarsens']
+            assert stats['index_bytes'] <= budget or stats['blocks'] == 1, name
+            coarsened += 1
+        idx = va.IndexedVCD(path, sidecar, enforce_gate=False)
+        try:
+            total += _diff(raw, idx, path)
+            _commands_equal(raw, idx, path)
+        finally:
+            idx.close()
+    assert coarsened >= 5 and total > 300
+
+
 def test_unicode_digit_file_native_defers(tmp_path):
     """A '#٥' timestamp: the parser accepts it (int() takes Unicode digits),
     the native builder refuses — the native path must defer so the indexed
@@ -336,3 +374,31 @@ def test_hostile_builder_errors_are_clean(tmp_path):
         assert result.returncode != 0, name
         assert 'Traceback' not in result.stderr, name
         assert not os.path.exists(va.sidecar_path(p)), name
+
+
+@pytest.mark.parametrize('builder', ['python', 'native'])
+def test_coarsening_stops_at_the_block_cap(tmp_path, builder):
+    """Over budget, merging still stops at max_block_bytes: an index whose
+    directory alone exceeds the budget must not merge down to one block."""
+    path = _write(tmp_path, 'many.vcd', CORPUS[sorted(CORPUS)[0]])
+    for name, text in CORPUS.items():
+        candidate = _write(tmp_path, 'c.vcd', text)
+        if va.build_index(candidate, tmp_path / 'probe.idx', 17)['blocks'] >= 8:
+            path = _write(tmp_path, 'many.vcd', text)
+            break
+    sidecar = tmp_path / 'capped.idx'
+    if builder == 'python':
+        stats = va.build_index(path, sidecar, 17, max_index_bytes=1, max_block_bytes=68)
+    else:
+        stats = va.native_index_build(str(path), str(sidecar), 17, 1, 68)
+        if stats is None:
+            pytest.skip('no native builder on this platform')
+    assert stats['block_bytes'] == 68 and stats['coarsens'] == 2
+    assert stats['blocks'] > 1
+    assert stats['data_start'] > 0
+    raw = va.VCDParser(str(path))
+    idx = va.IndexedVCD(path, sidecar, enforce_gate=False)
+    try:
+        _diff(raw, idx, path)
+    finally:
+        idx.close()

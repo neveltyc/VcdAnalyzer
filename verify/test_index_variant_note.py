@@ -49,6 +49,18 @@ def test_lite_index_errors_with_full_pointer(tmp_path):
     assert not os.path.exists(va.sidecar_path(src))
 
 
+def test_lite_index_pointer_for_every_invocation(tmp_path):
+    """--force, an existing sidecar and the hidden --auto all get the same
+    pointer — never a traceback or a full-build-only message."""
+    src = _big_file(tmp_path, mib=1)
+    open(va.sidecar_path(src), 'wb').close()
+    for extra in ([], ['--force'], ['--auto']):
+        result = _run(LITE, ['index', str(src)] + extra)
+        assert result.returncode == 1, extra
+        assert 'full vcd_analyzer.py only' in result.stderr, extra
+        assert 'Traceback' not in result.stderr, extra
+
+
 def test_lite_env_options_notice(tmp_path):
     src = _big_file(tmp_path, mib=1)
     result = _run(LITE, ['info', str(src)],
@@ -75,8 +87,9 @@ def test_lite_queries_unaffected(tmp_path):
 def test_full_python_fallback_advises_on_big_files(tmp_path, monkeypatch):
     """When the embedded native builder cannot serve a platform, the
     pure-Python fallback runs and says so on files big enough to care."""
-    src = _big_file(tmp_path)
+    src = _big_file(tmp_path, mib=1)
     monkeypatch.setattr(va, 'native_index_build', lambda *a, **k: None)
+    monkeypatch.setattr(va, '_SLOW_BUILD_NOTE_BYTES', 1 << 20)
     out = io.StringIO()
     options = argparse.Namespace(file=str(src), block_mib=8, force=True,
                                  output=None, auto=False, json=False,

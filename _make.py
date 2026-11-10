@@ -56,7 +56,11 @@ large changes.
 
 Discipline: only _preamble.py may contain module-level imports — the parts
 share one namespace by concatenation, and a stray import would still work
-but hides dependencies; --check rejects it.
+but hides dependencies; --check rejects it. The same shared namespace is why
+CI runs pyflakes on the two release files rather than on src/: a name one
+part misspells or another part never defines is caught there, before the
+line runs (see the `lint` job in .github/workflows/ci.yml for the exact
+pyflakes and pycodestyle commands).
 """
 
 import ast
@@ -175,7 +179,6 @@ _FAST_TEMPLATE = '''# ==========================================================
 
 import base64
 import ctypes
-import hashlib
 import lzma
 import platform as _platform
 

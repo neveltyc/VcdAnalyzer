@@ -10,6 +10,10 @@
 #      Python of each release-critical platform, Windows included: the
 #      full variant's embedded native builder is exercised for real on
 #      every matrix leg that has a matching library
+#   4. every name used in the assembled release files resolves (pyflakes:
+#      the parts share one namespace, so a misspelled name in one part is
+#      otherwise found only when that line runs), and src/ keeps one code
+#      style (pycodestyle)
 name: ci
 on:
   push:
@@ -38,6 +42,22 @@ jobs:
         run: pip install pytest pytest-xdist
       - name: Tests
         run: python -m pytest verify/ -q -n auto
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install the pinned linters
+        run: pip install pyflakes==4.1.0 pycodestyle==2.15.0
+      - name: Names resolve across parts
+        run: python -m pyflakes vcd_analyzer.py vcd_analyzer_lite.py
+      - name: One code style in src/
+        run: >-
+          python -m pycodestyle --max-line-length=140
+          --ignore=E114,E116,E121,E123,E126,E24,E704,W391,W503,W504 src/
 
   native:
     runs-on: ubuntu-latest

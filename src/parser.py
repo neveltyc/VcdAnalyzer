@@ -913,8 +913,8 @@ class VCDParser:
         each trigger'). Snapshot/compare last-write-wins semantics are
         unchanged.
         """
-        for time, sid, _prev, val in self._iter_changes(t0, t1, sids):
-            yield time, sid, val
+        for t, sid, _prev, val in self._iter_changes(t0, t1, sids):
+            yield t, sid, val
 
     def iter_transitions(self, t0=0, t1=None, sids=None, baseline=None):
         """Per-signal transition stream: yield (time, sid, prev, value, kind).
@@ -934,8 +934,8 @@ class VCDParser:
         plain parser, random access on an indexed one.
         """
         sid_kind = self._sid_kind
-        for time, sid, prev, val in self._iter_changes(t0, t1, sids, baseline):
-            yield time, sid, prev, val, sid_kind[sid]
+        for t, sid, prev, val in self._iter_changes(t0, t1, sids, baseline):
+            yield t, sid, prev, val, sid_kind[sid]
 
     def _iter_changes(self, t0=0, t1=None, sids=None, baseline=None):
         """Core change stream: yield (time, sid, prev, value) per value_change.

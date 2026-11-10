@@ -3,6 +3,25 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
+## Unreleased
+
+### Removed
+
+- Five environment variables that were tuning knobs or a test hook rather than settings:
+  `VCD_ANALYZER_MAX_UNIQUE_VALUES` and `VCD_ANALYZER_TOKEN_CHUNK_SIZE` (mentioned in the 1.5.1 notes, never in the
+  README or the skill), `VCD_ANALYZER_TAIL_WINDOW`, `VCD_ANALYZER_INDEX_PARALLEL_MIN`, and the test hook
+  `VCD_ANALYZER_FAIL_INDEX`. Their defaults are now fixed (65536 distinct values counted exactly by `summary`,
+  4 MiB text reads, a 64 KiB first tail window for `info`, 64 MiB of data before the native index builder splits
+  work), and a leftover setting is ignored without a message; `index --threads 1` still keeps a build on one
+  thread. The documented variables are unchanged.
+
+### Changed
+
+- CI has a lint job: pyflakes on both release files (the parts share one namespace, so a misspelled name in one
+  part would otherwise surface only when its line runs) and pycodestyle on `src/`. The index engine's compressed
+  one-line statements were reformatted to the style of the rest of `src/`; the syntax trees are unchanged.
+- The lite build no longer imports `codecs` and `time`, which only the index engine uses.
+
 ## [1.6.2](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.2) - 2026-11-10
 
 ### Changed

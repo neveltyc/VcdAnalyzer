@@ -106,19 +106,19 @@ __version__ = '1.6.2'
 import sys
 import os
 import re
-import codecs
 import math
 import decimal
 import json
 import argparse
 import tempfile
-import time
 # -- full variant only: index engine (_make.py drops this block from lite) --
 import bisect
+import codecs
 import hashlib
 import mmap
 import struct
 import subprocess
+import time
 from array import array
 # -- end full variant only --
 from collections import defaultdict

@@ -620,8 +620,6 @@ def val_to_int(value):
         return None
 
 
-
-
 def _clamp_overwide_logic_value(value, info):
     """Preserve clean 4-state state while rejecting malformed over-wide dumps.
 
@@ -645,6 +643,7 @@ def _clamp_overwide_logic_value(value, info):
     if _is_4state_bits(value):
         return 'x' * width
     return value
+
 
 def _normalize_filter_patterns(value):
     """Normalize and bound user-supplied substring/glob patterns.
@@ -3368,6 +3367,7 @@ def _summary_rows(vcd, t0, t1, sids):
     }
     return rows, undefined, counts
 
+
 def _public_row(row, verbose=False):
     r = dict(row)
     width = r.pop('_width', None)
@@ -4033,7 +4033,6 @@ def cmd_search(vcd, args):
 # ================================================================
 
 
-
 def _add_time_args(sp):
     sp.add_argument('--begin', metavar='TIME',
                     help='start time, e.g. 0, 100ns, 17.5us (omit = from start)')
@@ -4097,31 +4096,49 @@ def main():
     _add_common(sp)
 
     sp = sub.add_parser('info', help='file overview: timescale, signal count, time span, scopes')
-    sp.add_argument('file', metavar='<file>', help='VCD file path'); _add_common(sp); _add_output(sp)
+    sp.add_argument('file', metavar='<file>', help='VCD file path')
+    _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('list', help='list signals with path and bit width')
-    sp.add_argument('file', metavar='<file>'); _add_filter(sp); _add_common(sp); _add_output(sp)
+    sp.add_argument('file', metavar='<file>')
+    _add_filter(sp)
+    _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('dump', help='print value-change events in time order')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
+    sp.add_argument('file', metavar='<file>')
+    _add_time_args(sp)
+    _add_filter(sp)
+    _add_common(sp)
     _add_output(sp)
 
     sp = sub.add_parser('summary', help='window stats: active/static/undefined selected signals')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_filter(sp); _add_common(sp)
+    sp.add_argument('file', metavar='<file>')
+    _add_time_args(sp)
+    _add_filter(sp)
+    _add_common(sp)
     _add_output(sp)
 
     sp = sub.add_parser('snapshot', help='known signal values at a given time point')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='TIME', required=True, help='time point, e.g. 17.55us')
-    _add_filter(sp); _add_common(sp); _add_output(sp)
+    _add_filter(sp)
+    _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('compare', help='diff known signal values between two time points')
     sp.add_argument('file', metavar='<file>')
     sp.add_argument('--at', metavar='T1,T2', required=True, help='two time points comma-separated, e.g. 17.5us,17.7us')
-    _add_filter(sp); _add_common(sp); _add_output(sp)
+    _add_filter(sp)
+    _add_common(sp)
+    _add_output(sp)
 
     sp = sub.add_parser('search', help='conditional search and associated signal observation')
-    sp.add_argument('file', metavar='<file>'); _add_time_args(sp); _add_common(sp); _add_output(sp)
+    sp.add_argument('file', metavar='<file>')
+    _add_time_args(sp)
+    _add_common(sp)
+    _add_output(sp)
     sp.add_argument('--condition', metavar='COND', required=True, action='append',
                     help='comma-separated AND terms: SIG=VAL, SIG!=VAL, or changed(SIG); '
                          '!= does not match x/z/undef. Repeat the flag to OR the clauses '

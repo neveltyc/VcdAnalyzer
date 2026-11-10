@@ -168,6 +168,7 @@ def _summary_rows(vcd, t0, t1, sids):
     }
     return rows, undefined, counts
 
+
 def _public_row(row, verbose=False):
     r = dict(row)
     width = r.pop('_width', None)

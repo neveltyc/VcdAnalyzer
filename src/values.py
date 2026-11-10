@@ -88,8 +88,6 @@ def val_to_int(value):
         return None
 
 
-
-
 def _clamp_overwide_logic_value(value, info):
     """Preserve clean 4-state state while rejecting malformed over-wide dumps.
 
@@ -113,6 +111,7 @@ def _clamp_overwide_logic_value(value, info):
     if _is_4state_bits(value):
         return 'x' * width
     return value
+
 
 def _normalize_filter_patterns(value):
     """Normalize and bound user-supplied substring/glob patterns.

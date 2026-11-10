@@ -137,7 +137,7 @@ def tokens(fd, start, end, counters=None, chunk_size=1 << 20):
     carry = b''
     base = start
     while position < end:
-        chunk = _pread(fd, min(chunk_size, end-position), position)
+        chunk = _pread(fd, min(chunk_size, end - position), position)
         if not chunk:
             break
         if counters is not None:
@@ -191,6 +191,7 @@ def items(parser, fd, start, end, initial_time=0, counters=None, chunk_size=1 <<
     iterator = tokens(fd, start, end, counters, chunk_size)
     pushback = []
     current = initial_time
+
     def nxt():
         return pushback.pop() if pushback else next(iterator, None)
     while True:
@@ -308,6 +309,7 @@ def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=Non
     block_initial = 0
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
     stat_before = os.fstat(fd)
+
     def flush(end):
         nonlocal recent, block_start, block_initial
         if end <= block_start:
@@ -380,7 +382,8 @@ def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=Non
             for bid, off in zip(posting, posting_offsets):
                 buf.extend(POSTING.pack(bid, off))
                 if len(buf) >= 1 << 20:
-                    out.write(buf); buf.clear()
+                    out.write(buf)
+                    buf.clear()
             out.write(buf)
         out.close()
         _seal_sidecar(path, sidecar_tmp, sidecar)
@@ -411,6 +414,7 @@ def build_index(path, sidecar, block_bytes=AUTO_BLOCK_BYTES, max_index_bytes=Non
 
 class IndexedVCD(VCDParser):
     """All-signal random access without persistent values or snapshots."""
+
     def __init__(self, path, sidecar, enforce_gate=True):
         super().__init__(str(path))
         self._enforce_gate = enforce_gate
@@ -486,6 +490,7 @@ class IndexedVCD(VCDParser):
             raise
         self.reset_counters()
         self._advisable = None
+
     def close(self):
         for name, closer in (('mapping', lambda: self.mapping.close()),
                              ('index_file', lambda: self.index_file.close())):
@@ -495,9 +500,11 @@ class IndexedVCD(VCDParser):
         fd = self.__dict__.get('fd')
         if fd is not None:
             os.close(fd)
+
     def reset_counters(self):
         self.counters = {'bytes': 0, 'reads': 0, 'blocks': 0, 'point_records': 0,
                          'point_reads': 0}
+
     def index_advisable(self):
         """Per-file usage gate; False means 'a plain source scan wins'.
 
@@ -515,71 +522,91 @@ class IndexedVCD(VCDParser):
         benchmarks) so callers can introspect what production would do.
         """
         if self._advisable is None:
-            data=self.file_size-self.begin_offset
-            self._advisable=_index_pays_off(data,len(self.raw_id))
+            data = self.file_size - self.begin_offset
+            self._advisable = _index_pays_off(data, len(self.raw_id))
         return self._advisable
+
     def _gate_rejects(self):
         return self._enforce_gate and not self.index_advisable()
+
     def selected_raw(self, sids):
         result = set()
         for sid in self.signals if sids is None else sids:
             result.update(self.sources[sid])
         return result
+
     def posting(self, sym, block):
         location, count, flags = DIRECTORY.unpack_from(
-            self.mapping, self.directory_start+self.raw_id[sym]*DIRECTORY.size)
+            self.mapping, self.directory_start + self.raw_id[sym] * DIRECTORY.size)
         entry, size, runs = ENTRY[flags]
-        lo = 0; hi = count
+        lo = 0
+        hi = count
         while lo < hi:
-            mid = (lo+hi)//2
-            bid = entry.unpack_from(self.mapping, location+mid*size)[0]
-            if bid <= block: lo = mid+1
-            else: hi = mid
-        if lo == 0: return None
-        bid,second = entry.unpack_from(self.mapping, location+(lo-1)*size)
+            mid = (lo + hi) // 2
+            bid = entry.unpack_from(self.mapping, location + mid * size)[0]
+            if bid <= block:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo == 0:
+            return None
+        bid, second = entry.unpack_from(self.mapping, location + (lo - 1) * size)
         if bid >= len(self.blocks):
             raise _CorruptSidecarError('posting names block {} of {}'.format(
                 bid, len(self.blocks)))
-        return (min(block,second-1),None) if runs else (bid,second)
+        return (min(block, second - 1), None) if runs else (bid, second)
+
     def candidate_blocks(self, required, t0, t1, include_range=False):
         blocks = set()
         ranges = set()
         first = bisect.bisect_left(self.ends, t0)
-        last=len(self.blocks)-1 if t1 is None else bisect.bisect_right(self._block_starts,t1)-1
+        last = len(self.blocks) - 1 if t1 is None else bisect.bisect_right(self._block_starts, t1) - 1
         for sym in required:
             location, count, flags = DIRECTORY.unpack_from(
-                self.mapping, self.directory_start+self.raw_id[sym]*DIRECTORY.size)
+                self.mapping, self.directory_start + self.raw_id[sym] * DIRECTORY.size)
             entry, size, runs = ENTRY[flags]
             if runs:
-                lo=0;hi=count
-                while lo<hi:
-                    mid=(lo+hi)//2
-                    end=entry.unpack_from(self.mapping,location+mid*size)[1]
-                    if end<=first:lo=mid+1
-                    else:hi=mid
-                while lo<count:
-                    a,b=entry.unpack_from(self.mapping,location+lo*size)
-                    if a>=len(self.blocks) or b>len(self.blocks):
-                        raise _CorruptSidecarError('posting range {}-{} of {} blocks'.format(a,b,len(self.blocks)))
-                    if a>last:break
-                    a=max(a,first);b=min(b,last+1)
-                    if a<b:ranges.add((a,b))
-                    lo+=1
+                lo = 0
+                hi = count
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    end = entry.unpack_from(self.mapping, location + mid * size)[1]
+                    if end <= first:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                while lo < count:
+                    a, b = entry.unpack_from(self.mapping, location + lo * size)
+                    if a >= len(self.blocks) or b > len(self.blocks):
+                        raise _CorruptSidecarError('posting range {}-{} of {} blocks'.format(a, b, len(self.blocks)))
+                    if a > last:
+                        break
+                    a = max(a, first)
+                    b = min(b, last + 1)
+                    if a < b:
+                        ranges.add((a, b))
+                    lo += 1
                 continue
             # Rightmost <= first-1, then visit postings from first onward.
-            lo = 0; hi = count
+            lo = 0
+            hi = count
             while lo < hi:
-                mid=(lo+hi)//2
-                bid=entry.unpack_from(self.mapping,location+mid*size)[0]
-                if bid < first:lo=mid+1
-                else:hi=mid
-            while lo<count:
-                bid=entry.unpack_from(self.mapping,location+lo*size)[0]
-                if bid>=len(self.blocks):
-                    raise _CorruptSidecarError('posting names block {} of {}'.format(bid,len(self.blocks)))
-                if t1 is not None and self.blocks[bid][2]>t1:break
-                blocks.add(bid);lo+=1
-        for a,b in ranges:blocks.update(range(a,b))
+                mid = (lo + hi) // 2
+                bid = entry.unpack_from(self.mapping, location + mid * size)[0]
+                if bid < first:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            while lo < count:
+                bid = entry.unpack_from(self.mapping, location + lo * size)[0]
+                if bid >= len(self.blocks):
+                    raise _CorruptSidecarError('posting names block {} of {}'.format(bid, len(self.blocks)))
+                if t1 is not None and self.blocks[bid][2] > t1:
+                    break
+                blocks.add(bid)
+                lo += 1
+        for a, b in ranges:
+            blocks.update(range(a, b))
         if include_range and blocks:
             # Bit-exploded buses commit at EVERY top-level '#T' — including
             # ones in blocks whose only content is a timestamp (no postings,
@@ -587,19 +614,22 @@ class IndexedVCD(VCDParser):
             # has-timestamp bitmap, bus selections read the whole span.
             return list(range(min(blocks), max(blocks) + 1))
         return sorted(blocks)
+
     def block_items(self, bid):
-        start,end,t0,_t1 = self.blocks[bid]
+        start, end, t0, _t1 = self.blocks[bid]
         self.counters['blocks'] += 1
-        yield from items(self,self.fd,start,end,t0,self.counters)
+        yield from items(self, self.fd, start, end, t0, self.counters)
+
     def point_value(self, sym, bid, relative):
-        start,end,t0,_t1 = self.blocks[bid]
+        start, end, t0, _t1 = self.blocks[bid]
         self.counters['point_records'] += 1
-        for _pos,_before,kind,_after,record_sym,val in items(
-                self,self.fd,start+relative,end,t0,self.counters,chunk_size=4096):
-            if kind=='value':
-                assert record_sym==sym,(record_sym,sym)
+        for _pos, _before, kind, _after, record_sym, val in items(
+                self, self.fd, start + relative, end, t0, self.counters, chunk_size=4096):
+            if kind == 'value':
+                assert record_sym == sym, (record_sym, sym)
                 return val
         raise _CorruptSidecarError('indexed record missing')
+
     def point_values(self, bid, entries):
         """Resolve several same-block pointer postings by in-place record decode.
 
@@ -614,29 +644,34 @@ class IndexedVCD(VCDParser):
         per symbol. A window truncated mid-record (wide vectors) falls back
         to the streaming point_value.
         """
-        start,end,t0,_t1 = self.blocks[bid]
-        targets=sorted((start+relative,sym) for sym,relative in entries)
-        found={}
+        start, end, t0, _t1 = self.blocks[bid]
+        targets = sorted((start + relative, sym) for sym, relative in entries)
+        found = {}
         self.counters['point_reads'] += 1
         self.counters['point_records'] += len(targets)
-        i=0;n=len(targets)
-        while i<n:
+        i = 0
+        n = len(targets)
+        while i < n:
             # Targets within POINT_GROUP_SPAN share one pread.
-            lo=targets[i][0];hi=lo;j=i
-            while j<n and targets[j][0]-lo<=self.POINT_GROUP_SPAN:
-                hi=targets[j][0];j+=1
-            buf=_pread(self.fd,min(hi-lo+512,end-lo),lo)
+            lo = targets[i][0]
+            hi = lo
+            j = i
+            while j < n and targets[j][0] - lo <= self.POINT_GROUP_SPAN:
+                hi = targets[j][0]
+                j += 1
+            buf = _pread(self.fd, min(hi - lo + 512, end - lo), lo)
             self.counters['reads'] += 1
             self.counters['bytes'] += len(buf)
-            while i<j:
-                off,sym=targets[i]
-                val=self._record_in_buffer(buf,off-lo,sym)
+            while i < j:
+                off, sym = targets[i]
+                val = self._record_in_buffer(buf, off - lo, sym)
                 # None = window ends mid-record; stream-decode that one.
-                found[sym]=(val if val is not None
-                            else self.point_value(sym,bid,off-start))
-                i+=1
+                found[sym] = (val if val is not None
+                              else self.point_value(sym, bid, off - start))
+                i += 1
         return found
     POINT_GROUP_SPAN = 1 << 16
+
     @staticmethod
     def _record_in_buffer(buf, rel, sym):
         """Decode the value_change whose opener token starts at buf[rel].
@@ -648,113 +683,139 @@ class IndexedVCD(VCDParser):
         the record; AssertionError when the offset does not sit on the
         expected record.
         """
-        n=len(buf)
+        n = len(buf)
+
         def token(pos):
-            while pos<n and buf[pos] in b' \t\r\n\v\f':pos+=1
-            a=pos
-            while pos<n and buf[pos] not in b' \t\r\n\v\f':pos+=1
-            return (buf[a:pos].decode('utf-8','replace') if a<pos else None),pos
-        tok,p=token(rel)
-        if tok is None:return None
-        c0=tok[0]
+            while pos < n and buf[pos] in b' \t\r\n\v\f':
+                pos += 1
+            a = pos
+            while pos < n and buf[pos] not in b' \t\r\n\v\f':
+                pos += 1
+            return (buf[a:pos].decode('utf-8', 'replace') if a < pos else None), pos
+        tok, p = token(rel)
+        if tok is None:
+            return None
+        c0 = tok[0]
+
         def ident(pos):
-            t,q=token(pos)
-            if t is None:return None,None
-            if t!=sym:raise _CorruptSidecarError('posting offset mismatch: {} != {}'.format(t,sym))
-            return t,q
+            t, q = token(pos)
+            if t is None:
+                return None, None
+            if t != sym:
+                raise _CorruptSidecarError('posting offset mismatch: {} != {}'.format(t, sym))
+            return t, q
         if c0 in '01xXzZ':
-            if tok[1:]!=sym:raise _CorruptSidecarError('posting offset mismatch: {} != {}'.format(tok[1:],sym))
+            if tok[1:] != sym:
+                raise _CorruptSidecarError('posting offset mismatch: {} != {}'.format(tok[1:], sym))
             return c0.lower()
         if c0 in 'bB':
-            t2,q=ident(p)
-            if t2 is None:return None
+            t2, q = ident(p)
+            if t2 is None:
+                return None
             return tok[1:].lower()
         if c0 in 'rR':
-            t2,q=ident(p)
-            if t2 is None:return None
+            t2, q = ident(p)
+            if t2 is None:
+                return None
             return tok[1:]
-        if c0=='p':
+        if c0 == 'p':
             # p<state> <strength0> <strength1> <id>: the two strengths are
             # single digits, not identifiers; only the 4th token is the sym.
-            t2,q2=token(p)
-            t3,q3=token(q2)
-            if t3 is None:return None
-            t4,q4=ident(q3)
-            if t4 is None:return None
+            t2, q2 = token(p)
+            t3, q3 = token(q2)
+            if t3 is None:
+                return None
+            t4, q4 = ident(q3)
+            if t4 is None:
+                return None
             return ''.join(_PORT_STATE[c] for c in tok[1:])
-        raise _CorruptSidecarError('posting offset not at a value record: {} != {}'.format(tok,sym))
+        raise _CorruptSidecarError('posting offset not at a value record: {} != {}'.format(tok, sym))
+
     def raw_at(self, t, required, pointers=True):
-        if t<0 or not required:return {}
-        complete=bisect.bisect_right(self.ends,t)-1
-        partial=complete+1
-        latest={}
-        if partial<len(self.blocks) and self.blocks[partial][2]<=t:
-            if any((p:=self.posting(sym,partial)) is not None and p[0]==partial for sym in required):
-                for _pos,_before,kind,at,sym,val in self.block_items(partial):
-                    if at>t:break
-                    if kind=='value' and sym in required:latest[sym]=val
-        grouped=defaultdict(list)
-        for sym in required-latest.keys():
-            posting=self.posting(sym,complete)
-            if posting is not None:grouped[posting[0]].append((sym,posting[1]))
+        if t < 0 or not required:
+            return {}
+        complete = bisect.bisect_right(self.ends, t) - 1
+        partial = complete + 1
+        latest = {}
+        if partial < len(self.blocks) and self.blocks[partial][2] <= t:
+            if any((p := self.posting(sym, partial)) is not None and p[0] == partial for sym in required):
+                for _pos, _before, kind, at, sym, val in self.block_items(partial):
+                    if at > t:
+                        break
+                    if kind == 'value' and sym in required:
+                        latest[sym] = val
+        grouped = defaultdict(list)
+        for sym in required - latest.keys():
+            posting = self.posting(sym, complete)
+            if posting is not None:
+                grouped[posting[0]].append((sym, posting[1]))
         for bid, entries in sorted(grouped.items()):
-            if pointers and all(relative is not None for _sym,relative in entries):
-                if len(entries)>1:
-                    latest.update(self.point_values(bid,entries))
+            if pointers and all(relative is not None for _sym, relative in entries):
+                if len(entries) > 1:
+                    latest.update(self.point_values(bid, entries))
                 else:
-                    sym,relative=entries[0]
-                    latest[sym]=self.point_value(sym,bid,relative)
+                    sym, relative = entries[0]
+                    latest[sym] = self.point_value(sym, bid, relative)
             else:
-                wanted={sym for sym,_ in entries}
-                for _pos,_before,kind,_at,sym,val in self.block_items(bid):
-                    if kind=='value' and sym in wanted:latest[sym]=val
+                wanted = {sym for sym, _ in entries}
+                for _pos, _before, kind, _at, sym, val in self.block_items(bid):
+                    if kind == 'value' and sym in wanted:
+                        latest[sym] = val
         return latest
+
     def fold_raw(self, raw, sids):
-        selected=self.signals.keys() if sids is None else sids
-        state={}
-        vec_width=self._vec_width
+        selected = self.signals.keys() if sids is None else sids
+        state = {}
+        vec_width = self._vec_width
         for sid in selected:
-            info=self.signals[sid]
+            info = self.signals[sid]
             if not info.get('synthesized'):
                 if sid in raw:
                     # 1.5.6 canonicalization: short 4-state vector values are
                     # left-extended to the declared width (b11 == b0011 on 4
                     # bits), over-wide logic values clamp to all-x. Real and
                     # event values are never padded (vec_width holds vectors).
-                    val=raw[sid]
-                    n=len(val);w=info['width']
-                    if n<w and sid in vec_width and _is_4state_bits(val):
-                        val=val.rjust(w,_PAD_CHAR[val[0]])
-                    elif n>w:
-                        val=_clamp_overwide_logic_value(val,info)
-                    state[sid]=val
+                    val = raw[sid]
+                    n = len(val)
+                    w = info['width']
+                    if n < w and sid in vec_width and _is_4state_bits(val):
+                        val = val.rjust(w, _PAD_CHAR[val[0]])
+                    elif n > w:
+                        val = _clamp_overwide_logic_value(val, info)
+                    state[sid] = val
                 continue
-            bits=_bus_bytes(self._bit_state_template[sid])
-            top=len(bits)-1
-            observed=False
+            bits = _bus_bytes(self._bit_state_template[sid])
+            top = len(bits) - 1
+            observed = False
             for sym in self.sources[sid]:
                 if sym in raw:
-                    value=raw[sym]
-                    bit=ord(value) if len(value)==1 and _is_4state_bits(value) else 120  # 'x'
-                    for gid,index in self._bit_map[sym]:
-                        if gid==sid:bits[top-index]=bit;observed=True
-            if observed:state[sid]=bits.decode('ascii')
+                    value = raw[sym]
+                    bit = ord(value) if len(value) == 1 and _is_4state_bits(value) else 120  # 'x'
+                    for gid, index in self._bit_map[sym]:
+                        if gid == sid:
+                            bits[top - index] = bit
+                            observed = True
+            if observed:
+                state[sid] = bits.decode('ascii')
         return state
-    def state_at(self,t_at,sids=None,pointers=True):
+
+    def state_at(self, t_at, sids=None, pointers=True):
         if self._gate_rejects():
             # Gate rejected this file: header-heavy / data-tiny, where the
             # index costs more than the plain scan it replaces. Degrade to
             # the reference implementation; results stay identical.
-            self.counters['gate_rejected']=True
-            return super().state_at(t_at,sids)
+            self.counters['gate_rejected'] = True
+            return super().state_at(t_at, sids)
         try:
-            return self.fold_raw(self.raw_at(t_at,self.selected_raw(sids),pointers),sids)
+            return self.fold_raw(self.raw_at(t_at, self.selected_raw(sids), pointers), sids)
         except _CorruptSidecarError:
-            self.counters['corrupt_fallback']=True
-            return super().state_at(t_at,sids)
-    def state_pair(self,ta,tb,sids=None):
-        return self.state_at(ta,sids),self.state_at(tb,sids)
-    def _iter_changes(self,t0=0,t1=None,sids=None,baseline=None):
+            self.counters['corrupt_fallback'] = True
+            return super().state_at(t_at, sids)
+
+    def state_pair(self, ta, tb, sids=None):
+        return self.state_at(ta, sids), self.state_at(tb, sids)
+
+    def _iter_changes(self, t0=0, t1=None, sids=None, baseline=None):
         """The plain parser's change stream over the candidate blocks only.
 
         No second decoder: the blocks that can hold a selected record are
@@ -767,59 +828,61 @@ class IndexedVCD(VCDParser):
         candidate_blocks), so a bus's per-tick commit never straddles a gap.
         """
         if self._gate_rejects():
-            self.counters['gate_rejected']=True
-            yield from super()._iter_changes(t0,t1,sids,baseline)
+            self.counters['gate_rejected'] = True
+            yield from super()._iter_changes(t0, t1, sids, baseline)
             return
-        required=self.selected_raw(sids)
-        if not required:return
+        required = self.selected_raw(sids)
+        if not required:
+            return
         try:
             # Bus commit fidelity needs the range read ONLY when this query
             # actually selects synthesized buses (a repeated '#T' with no bus
             # writes in between is a suppressed no-op; a gap '#T' terminating
             # a selected bus's writes is not). Scalar-only queries on a file
             # that merely CONTAINS buses must keep hit-block random access.
-            needs_bus=(sids is None
-                       or any(s in self._bit_state_template for s in sids))
-            candidates=self.candidate_blocks(required,t0,t1,include_range=needs_bus)
-            raw=self.raw_at(t0-1,required)
+            needs_bus = (sids is None
+                         or any(s in self._bit_state_template for s in sids))
+            candidates = self.candidate_blocks(required, t0, t1, include_range=needs_bus)
+            raw = self.raw_at(t0 - 1, required)
         except _CorruptSidecarError:
-            self.counters['corrupt_fallback']=True
-            yield from super()._iter_changes(t0,t1,sids,baseline)
+            self.counters['corrupt_fallback'] = True
+            yield from super()._iter_changes(t0, t1, sids, baseline)
             return
-        runs=[]
+        runs = []
         for bid in candidates:
-            if runs and runs[-1][1]==bid:
-                runs[-1][1]=bid+1
+            if runs and runs[-1][1] == bid:
+                runs[-1][1] = bid + 1
             else:
-                runs.append([bid,bid+1])
-        yield from self._change_stream(self._run_token_lists(runs),t0,t1,sids,baseline,
-                                       raw,self.fold_raw(raw,sids))
+                runs.append([bid, bid + 1])
+        yield from self._change_stream(self._run_token_lists(runs), t0, t1, sids, baseline,
+                                       raw, self.fold_raw(raw, sids))
+
     def _run_token_lists(self, runs):
-        chunk_size=_token_chunk_size()
-        for first,stop in runs:
-            start=self.blocks[first][0]
-            end=self.blocks[stop-1][1]
-            self.counters['blocks']+=stop-first
+        chunk_size = _token_chunk_size()
+        for first, stop in runs:
+            start = self.blocks[first][0]
+            end = self.blocks[stop - 1][1]
+            self.counters['blocks'] += stop - first
             yield ['#{}'.format(self.blocks[first][2])]
-            yield from _split_text_chunks(self._text_chunks(start,end,chunk_size))
+            yield from _split_text_chunks(self._text_chunks(start, end, chunk_size))
+
     def _text_chunks(self, start, end, chunk_size):
         """Decoded text of source bytes [start, end), as the plain parser's
         text-mode read decodes it (UTF-8, replacement on error)."""
-        decoder=codecs.getincrementaldecoder('utf-8')('replace')
-        while start<end:
-            data=_pread(self.fd,min(chunk_size,end-start),start)
+        decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        while start < end:
+            data = _pread(self.fd, min(chunk_size, end - start), start)
             if not data:
                 break
-            start+=len(data)
-            self.counters['reads']+=1
-            self.counters['bytes']+=len(data)
-            text=decoder.decode(data)
+            start += len(data)
+            self.counters['reads'] += 1
+            self.counters['bytes'] += len(data)
+            text = decoder.decode(data)
             if text:
                 yield text
-        text=decoder.decode(b'',True)
+        text = decoder.decode(b'', True)
         if text:
             yield text
-
 
 
 # Smallest data section the native builder splits across threads.
@@ -1254,6 +1317,7 @@ def _build_index_command(vcd, args):
               'the pure-Python index mechanism (much slower). Supported '
               'platforms build natively with up to 4 threads.')
     print('Use      : queries pick this up automatically; VCD_ANALYZER_NO_INDEX=1 disables')
+
 
 def cmd_index(vcd, args):
     """The `index` command. A background build (--auto, spawned by

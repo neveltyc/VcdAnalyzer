@@ -3,10 +3,8 @@ timestamps under the multi-thread native builder (P0-1), truncated/
 corrupt sidecars (P0-2), the stale-sidecar fd leak that blocked
 auto-rebuild via lsof (P1-1), the malformed-#T bus-commit divergence
 (P1-2), and --block-mib bounds (P2-4)."""
-import ctypes
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -14,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vcd_analyzer as va
-from conftest import run_cli
+from conftest import FAIL_BUILD, run_cli, run_cli_patched
 from test_index import _big_vcd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,13 +68,12 @@ def _windows_agree(idx, ref, raw, fracs):
 @pytest.mark.skipif(not (ROOT / 'vcd_analyzer.py').exists(), reason='no release file')
 def test_multithread_survives_malformed_timestamps(tmp_path, monkeypatch):
     src = _malformed_ts_vcd(tmp_path / 'bad.vcd')
-    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
-               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
+    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4')
     sidecar = tmp_path / 'side.vcidx'
-    result = subprocess.run(
-        [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
-         str(src), '--output', str(sidecar), '--block-mib', '1'],
-        capture_output=True, text=True, env=env, timeout=300)
+    result = run_cli_patched(
+        ['--json', 'index', str(src),
+         '--output', str(sidecar), '--block-mib', '1'],
+        'va.NATIVE_PARALLEL_MIN = 1', timeout=300, env=env)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['threads'] == 4
     idx = va.IndexedVCD(src, sidecar, enforce_gate=False)
@@ -108,7 +105,6 @@ def test_truncated_sidecar_falls_back_cleanly(tmp_path, capsys):
 
 
 def test_stale_sidecar_does_not_leak_fd(tmp_path):
-    import shutil
     from test_index import _big_vcd
     src = _big_vcd(tmp_path)
     va.build_index(src, va.sidecar_path(src), 64)
@@ -310,14 +306,12 @@ def test_output_may_not_be_the_vcd_itself(tmp_path):
 def test_failed_rebuild_keeps_previous_sidecar(tmp_path, monkeypatch):
     """A failed rebuild must leave a pre-existing target untouched: builders
     clean their own temp files, never the published target (P1). The failure
-    is injected in the CLI subprocess via VCD_ANALYZER_FAIL_INDEX (a test
-    hook honored only when the env var is set)."""
+    is injected in the CLI subprocess by replacing build_index_best."""
     src = _big_vcd(tmp_path)
     sidecar = Path(va.sidecar_path(src))
     va.build_index(src, sidecar, 64)
     good = sidecar.read_bytes()
-    monkeypatch.setenv('VCD_ANALYZER_FAIL_INDEX', '1')
-    result = run_cli(['index', str(src), '--force'])
+    result = run_cli_patched(['index', str(src), '--force'], FAIL_BUILD)
     assert result.returncode != 0
     assert sidecar.read_bytes() == good, 'failed rebuild destroyed the old sidecar'
 
@@ -333,13 +327,11 @@ def test_comment_body_never_becomes_split_anchor(tmp_path):
         while path.stat().st_size < 1 << 20:
             out.write('#%d\n0!\n$comment rebuild at #%d pending $end\n1!\n' % (t, t + 1))
             t += 2
-    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
-               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
-    import subprocess
-    result = subprocess.run(
-        [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
-         str(path), '--output', str(tmp_path / 's.vcidx'), '--block-mib', '1'],
-        capture_output=True, text=True, env=env, timeout=120)
+    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4')
+    result = run_cli_patched(
+        ['--json', 'index', str(path),
+         '--output', str(tmp_path / 's.vcidx'), '--block-mib', '1'],
+        'va.NATIVE_PARALLEL_MIN = 1', timeout=120, env=env)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['threads'] == 1  # census forced single
     idx = va.IndexedVCD(path, tmp_path / 's.vcidx', enforce_gate=False)
@@ -464,12 +456,11 @@ def test_native_contained_comment_keeps_parallel(tmp_path, monkeypatch):
         out.write('#0\n1!\n')
         out.write('$comment %s $end\n' % filler)  # ~52 KB, well before 25%
         out.write(_toggles(2, 70 << 20))
-    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
-               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
-    result = subprocess.run(
-        [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
-         str(path), '--output', str(tmp_path / 'c.vcidx'), '--block-mib', '1'],
-        capture_output=True, text=True, env=env, timeout=300)
+    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4')
+    result = run_cli_patched(
+        ['--json', 'index', str(path),
+         '--output', str(tmp_path / 'c.vcidx'), '--block-mib', '1'],
+        'va.NATIVE_PARALLEL_MIN = 1', timeout=300, env=env)
     assert result.returncode == 0, result.stderr
     stats = json.loads(result.stdout)
     assert stats['threads'] == 4
@@ -504,12 +495,11 @@ def test_native_straddling_comment_falls_back(tmp_path, monkeypatch):
         out.write(first)
         out.write('$comment %s $end\n' % half_filler)
         out.write(_toggles(t, 34 << 20))
-    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
-               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
-    result = subprocess.run(
-        [sys.executable, '-S', str(ROOT / 'vcd_analyzer.py'), '--json', 'index',
-         str(path), '--output', str(tmp_path / 's.vcidx'), '--block-mib', '1'],
-        capture_output=True, text=True, env=env, timeout=300)
+    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4')
+    result = run_cli_patched(
+        ['--json', 'index', str(path),
+         '--output', str(tmp_path / 's.vcidx'), '--block-mib', '1'],
+        'va.NATIVE_PARALLEL_MIN = 1', timeout=300, env=env)
     assert result.returncode == 0, result.stderr
     stats = json.loads(result.stdout)
     assert stats['parallel_fallback'] is True

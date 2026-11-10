@@ -929,13 +929,11 @@ def build_index_best(path, sidecar, block_bytes=None, threads=None):
     threads None reads VCD_ANALYZER_INDEX_THREADS (0/unset = automatic);
     the native builder receives it as an argument, never via the
     environment."""
-    if os.environ.get('VCD_ANALYZER_FAIL_INDEX'):
-        raise ValueError('simulated index failure (VCD_ANALYZER_FAIL_INDEX)')
     if threads is None:
         threads = min(_env_int('VCD_ANALYZER_INDEX_THREADS', 0), 16)
     elif not 0 <= threads <= 16:
         raise ValueError('threads must be 0 (automatic) .. 16; got {}'.format(threads))
-    parallel_min = _env_int('VCD_ANALYZER_INDEX_PARALLEL_MIN', NATIVE_PARALLEL_MIN)
+    parallel_min = NATIVE_PARALLEL_MIN
     budget = cap = None
     if block_bytes is None:
         block_bytes = AUTO_BLOCK_BYTES

@@ -188,15 +188,15 @@ def test_threads_reach_the_native_builder_as_an_argument(tmp_path, monkeypatch):
     monkeypatch.delenv('VCD_ANALYZER_INDEX_THREADS', raising=False)
     import os
     before = dict(os.environ)
+    default_min = va.NATIVE_PARALLEL_MIN
     va.build_index_best(str(src), str(tmp_path / 'a.vcidx'), threads=3)
     monkeypatch.setenv('VCD_ANALYZER_INDEX_THREADS', '99')
     va.build_index_best(str(src), str(tmp_path / 'b.vcidx'))
-    monkeypatch.setenv('VCD_ANALYZER_INDEX_PARALLEL_MIN', '7')
+    monkeypatch.setattr(va, 'NATIVE_PARALLEL_MIN', 7)
     va.build_index_best(str(src), str(tmp_path / 'c.vcidx'))
     monkeypatch.delenv('VCD_ANALYZER_INDEX_THREADS')
-    monkeypatch.delenv('VCD_ANALYZER_INDEX_PARALLEL_MIN')
     assert dict(os.environ) == before
-    assert seen == [(3, va.NATIVE_PARALLEL_MIN), (16, va.NATIVE_PARALLEL_MIN), (16, 7)]
+    assert seen == [(3, default_min), (16, default_min), (16, 7)]
     with pytest.raises(ValueError, match='threads'):
         va.build_index_best(str(src), str(tmp_path / 'd.vcidx'), threads=-1)
 

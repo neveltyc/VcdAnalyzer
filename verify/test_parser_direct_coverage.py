@@ -330,9 +330,9 @@ def test_scan_time_range_trailing_dumpon(tmp_path):
 def test_scan_time_range_grow_on_miss_env(tmp_path, monkeypatch):
     # A trailing value_change run larger than the (tiny) window sits after the
     # last #T. The first EOF window has no #T, so t_max must grow until it finds
-    # #100 rather than degrade to t_min. VCD_ANALYZER_TAIL_WINDOW forces the
+    # #100 rather than degrade to t_min. A tiny _TAIL_WINDOW forces the
     # multi-window/grow path on a small fixture.
-    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '256')
+    monkeypatch.setattr(va, '_TAIL_WINDOW', 256)
     p = write_vcd(tmp_path, minimal_vcd(
         '$var wire 1 ! s $end\n',
         '#0\n0!\n#100\n' + '1!\n0!\n' * 400))   # ~2.4 KiB tail >> 256 B window
@@ -345,7 +345,7 @@ def test_scan_time_range_window_start_inside_comment_resync_env(tmp_path, monkey
     # #<digits>. The stray-$end resync (a bare $end before any opener means the
     # window began inside a section body) discards the body number, so t_max is
     # the real last timestamp #42, not #999.
-    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '24')
+    monkeypatch.setattr(va, '_TAIL_WINDOW', 24)
     p = write_vcd(tmp_path, minimal_vcd(
         '$var wire 1 ! s $end\n',
         '#0\n0!\n#42\n1!\n$comment note note #999 note note $end\n'))
@@ -354,7 +354,7 @@ def test_scan_time_range_window_start_inside_comment_resync_env(tmp_path, monkey
 
 
 def test_scan_time_range_window_start_inside_vcdclose_resync_env(tmp_path, monkeypatch):
-    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '16')
+    monkeypatch.setattr(va, '_TAIL_WINDOW', 16)
     p = write_vcd(tmp_path, minimal_vcd(
         '$var wire 1 ! s $end\n',
         '#0\n0!\n#42\n1!\n$vcdclose #999 $end\n'))
@@ -366,7 +366,7 @@ def test_scan_time_range_boundary_split_timestamp_env(tmp_path, monkeypatch):
     # A window boundary cutting a #<digits> must not yield a truncated but valid
     # smaller timestamp: the leading partial fragment is dropped and a larger
     # window re-reads the token intact. A tiny window forces the split.
-    monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '8')
+    monkeypatch.setattr(va, '_TAIL_WINDOW', 8)
     p = write_vcd(tmp_path, minimal_vcd(
         '$var wire 1 ! s $end\n',
         '#0\n0!\n#123456789\n1!\n'))
@@ -391,9 +391,9 @@ def test_scan_time_range_window_size_invariance(tmp_path, monkeypatch):
     for data, expected in cases:
         p = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! s $end\n', data), name='inv.vcd')
         v = va.VCDParser(str(p))
-        monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '100000000')  # one full pass
+        monkeypatch.setattr(va, '_TAIL_WINDOW', 100000000)  # one full pass
         big = v.scan_time_range()
-        monkeypatch.setenv('VCD_ANALYZER_TAIL_WINDOW', '8')          # many tiny windows
+        monkeypatch.setattr(va, '_TAIL_WINDOW', 8)          # many tiny windows
         small = v.scan_time_range()
         assert big == small == expected, (data, big, small, expected)
 

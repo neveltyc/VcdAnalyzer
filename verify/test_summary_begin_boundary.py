@@ -141,7 +141,7 @@ def test_summary_unique_count_is_exact_below_cap(tmp_path):
 
 
 def test_summary_unique_count_caps_and_marks_lower_bound(tmp_path, monkeypatch):
-    monkeypatch.setenv("VCD_ANALYZER_MAX_UNIQUE_VALUES", "2")
+    monkeypatch.setattr(va, "_MAX_UNIQUE_VALUES", 2)
     p = write_vcd(tmp_path, minimal_vcd(_CNT_DECL, _CNT_DATA))
     v = va.VCDParser(str(p))
     rows, _undef, _counts = va._summary_rows(v, 0, None, None)
@@ -151,7 +151,7 @@ def test_summary_unique_count_caps_and_marks_lower_bound(tmp_path, monkeypatch):
 
 
 def test_summary_text_marks_capped_unique_as_lower_bound(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("VCD_ANALYZER_MAX_UNIQUE_VALUES", "2")
+    monkeypatch.setattr(va, "_MAX_UNIQUE_VALUES", 2)
     p = write_vcd(tmp_path, minimal_vcd(_CNT_DECL, _CNT_DATA))
     v = va.VCDParser(str(p))
     va.cmd_summary(v, ns(begin="0ns", end=None, verbose=True))

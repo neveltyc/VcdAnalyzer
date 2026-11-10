@@ -10,12 +10,16 @@ def _unique_key(val):
     ~600 MB of strings alive for a 1 MB file. hash() is the string hash the
     set would compute anyway (no extra pass over the value, unlike a
     cryptographic digest, which cost ~5 us per 8 KiB value per tick). A
-    collision among the at most VCD_ANALYZER_MAX_UNIQUE_VALUES keys is
+    collision among the at most _MAX_UNIQUE_VALUES keys is
     ~1e-10 likely and would undercount by one; a tuple never equals a
     short value (str)."""
     if len(val) <= 32:
         return val
     return len(val), hash(val)
+
+
+# Distinct values counted exactly per signal; read per call (tests shrink it).
+_MAX_UNIQUE_VALUES = 65536
 
 
 def _summary_rows(vcd, t0, t1, sids):
@@ -41,18 +45,15 @@ def _summary_rows(vcd, t0, t1, sids):
     transitions only. x/z-related transitions still count as changes, but not
     as rises/falls.
 
-    The distinct-value count (`unique`) is exact up to
-    VCD_ANALYZER_MAX_UNIQUE_VALUES (default 65536, read per call like
-    VCD_ANALYZER_TOKEN_CHUNK_SIZE); beyond the cap it is a lower bound, and
-    the row says so: JSON `unique_is_exact: false` (the key appears only when
-    capped), text `uniq=N+`. This bounds memory on e.g. a 32-bit counter over
-    tens of millions of changes instead of keeping every value string alive.
+    The distinct-value count (`unique`) is exact up to _MAX_UNIQUE_VALUES
+    (65536); beyond the cap it is a lower bound, and the row says so: JSON
+    `unique_is_exact: false` (the key appears only when capped), text
+    `uniq=N+`. This bounds memory on e.g. a 32-bit counter over tens of
+    millions of changes instead of keeping every value string alive.
     """
     selected = _selected_sids(vcd, sids)
     init_boundary = 0 if t0 == 0 else t0 - 1
-    # Per-call env read so tests can shrink the cap via monkeypatch.setenv
-    # without reloading the module.
-    unique_cap = _env_int('VCD_ANALYZER_MAX_UNIQUE_VALUES', 65536)
+    unique_cap = _MAX_UNIQUE_VALUES
 
     # Baseline: {sid: val}. The stream fills in the state strictly before t0
     # (a late window neither replays nor decodes the head of the file); when

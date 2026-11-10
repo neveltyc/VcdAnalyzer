@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vcd_analyzer as va
 
+from conftest import FAIL_BUILD, run_cli_patched
 from test_index import _big_vcd  # gate-passing synthetic file helper
 
 pytestmark = pytest.mark.skipif(sys.platform == 'win32',
@@ -67,14 +68,7 @@ def test_output_link_failure_warns(tmp_path):
 def _run_cli_any_size(args):
     """Run the CLI with the automatic-build size floor lifted, so the small
     synthetic files here exercise the same path a 10 MiB dump takes."""
-    import subprocess
-    from conftest import SCRIPT
-    code = ('import sys; sys.argv = sys.argv[1:]; sys.path.insert(0, {!r}); '
-            'import vcd_analyzer as va; va._AUTO_INDEX_MIN_BYTES = 0; va.main()'
-            ).format(str(SCRIPT.parent))
-    return subprocess.run([sys.executable, '-S', '-c', code, str(SCRIPT)]
-                          + list(map(str, args)), text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    return run_cli_patched(args, 'va._AUTO_INDEX_MIN_BYTES = 0')
 
 
 def test_auto_build_spawn(tmp_path):
@@ -122,12 +116,10 @@ def test_background_build_log_only_on_failure(tmp_path, monkeypatch):
     src = _big_vcd(tmp_path)
     _settled(src)
     log = Path(va.sidecar_path(src) + '.log')
-    monkeypatch.setenv('VCD_ANALYZER_FAIL_INDEX', '1')
-    failed = _run_cli(['index', str(src), '--auto'])
+    failed = run_cli_patched(['index', str(src), '--auto'], FAIL_BUILD)
     assert failed.returncode == va._EXIT_ERROR
     assert failed.stderr == ''  # detached: diagnostics go to the log
     assert 'simulated index failure' in log.read_text(encoding='utf-8')
-    monkeypatch.delenv('VCD_ANALYZER_FAIL_INDEX')
     built = _run_cli(['index', str(src), '--auto'])
     assert built.returncode == 0, built.stderr
     assert va._sidecar_fresh(src, va.sidecar_path(src))
@@ -192,7 +184,6 @@ def test_writer_held_detected(tmp_path):
 
 
 def _run_cli(args, env_extra=None):
-    import subprocess
     from conftest import run_cli as _rc
     return _rc(args)
 

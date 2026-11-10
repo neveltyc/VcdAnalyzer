@@ -8,8 +8,6 @@ multi-line declarations) that the standard fixtures do not exercise.
 """
 import os
 
-import pytest
-
 import vcd_analyzer as va
 from conftest import write_vcd, minimal_vcd
 
@@ -38,9 +36,9 @@ def test_chunk_tokenizer_matches_line_based_small_chunks(tmp_path, monkeypatch):
         data_lines.append('{}{}\n'.format(k % 2, chr(33 + (k % 5))))
     p = write_vcd(tmp_path, minimal_vcd(decls, ''.join(data_lines)))
 
-    monkeypatch.setenv('VCD_ANALYZER_TOKEN_CHUNK_SIZE', '65536')
+    monkeypatch.setattr(va, '_TOKEN_CHUNK_SIZE', 65536)
     a = _events(p)
-    monkeypatch.delenv('VCD_ANALYZER_TOKEN_CHUNK_SIZE', raising=False)
+    monkeypatch.undo()
     b = _events(p)
     assert a == b
     # Sanity: every value change is an event (IEEE 1364 permits several

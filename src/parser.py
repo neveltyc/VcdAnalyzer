@@ -134,10 +134,16 @@ def _bus_bytes(bits):
     return bytearray(''.join(reversed(bits)), 'ascii')
 
 
+# Text read size for the data-section tokenizer, and the first tail window
+# of scan_time_range (doubled on a miss, so it must be positive). Module
+# constants read per call, so tests shrink them with monkeypatch; neither is
+# a user-facing setting.
+_TOKEN_CHUNK_SIZE = 4 * 1024 * 1024
+_TAIL_WINDOW = 64 * 1024
+
+
 def _token_chunk_size(chunk_size=None):
-    if chunk_size is None:
-        chunk_size = _env_int('VCD_ANALYZER_TOKEN_CHUNK_SIZE', 4 * 1024 * 1024)
-    return max(chunk_size, 65536)
+    return _TOKEN_CHUNK_SIZE if chunk_size is None else chunk_size
 
 
 def _split_text_chunks(chunks):
@@ -1277,9 +1283,9 @@ class VCDParser:
           reaches the data-section floor — a provably-correct full forward scan
           that the old reverse walk never had.
 
-        Reading only a bounded tail (``VCD_ANALYZER_TAIL_WINDOW``, default
-        64 KiB, doubled on a miss) keeps ``info`` on a 500 MB VCD to well under
-        a second instead of the ~90 s a full sequential scan would cost. All
+        Reading only a bounded tail (``_TAIL_WINDOW``, 64 KiB, doubled on a
+        miss) keeps ``info`` on a 500 MB VCD to well under a second instead
+        of the ~90 s a full sequential scan would cost. All
         ``#T`` parsing routes through the hardened ``_parse_vcd_timestamp_token``
         (bounded digits, int64 cap), so a hostile timestamp yields a clean CLI
         error rather than a raw traceback.
@@ -1312,9 +1318,7 @@ class VCDParser:
         # _data_offset may be a text-mode tell() cookie (opaque, possibly larger
         # than file_size); clamp to a safe floor for the binary tail read.
         floor = self._data_offset if self._data_offset < file_size else 0
-        window = _env_int('VCD_ANALYZER_TAIL_WINDOW', 64 * 1024)
-        if window < 1:
-            window = 1
+        window = _TAIL_WINDOW
         t_max = None
         while t_max is None:
             start = max(floor, file_size - window)

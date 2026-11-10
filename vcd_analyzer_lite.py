@@ -847,10 +847,16 @@ def _bus_bytes(bits):
     return bytearray(''.join(reversed(bits)), 'ascii')
 
 
+# Text read size for the data-section tokenizer, and the first tail window
+# of scan_time_range (doubled on a miss, so it must be positive). Module
+# constants read per call, so tests shrink them with monkeypatch; neither is
+# a user-facing setting.
+_TOKEN_CHUNK_SIZE = 4 * 1024 * 1024
+_TAIL_WINDOW = 64 * 1024
+
+
 def _token_chunk_size(chunk_size=None):
-    if chunk_size is None:
-        chunk_size = _env_int('VCD_ANALYZER_TOKEN_CHUNK_SIZE', 4 * 1024 * 1024)
-    return max(chunk_size, 65536)
+    return _TOKEN_CHUNK_SIZE if chunk_size is None else chunk_size
 
 
 def _split_text_chunks(chunks):
@@ -1990,9 +1996,9 @@ class VCDParser:
           reaches the data-section floor — a provably-correct full forward scan
           that the old reverse walk never had.
 
-        Reading only a bounded tail (``VCD_ANALYZER_TAIL_WINDOW``, default
-        64 KiB, doubled on a miss) keeps ``info`` on a 500 MB VCD to well under
-        a second instead of the ~90 s a full sequential scan would cost. All
+        Reading only a bounded tail (``_TAIL_WINDOW``, 64 KiB, doubled on a
+        miss) keeps ``info`` on a 500 MB VCD to well under a second instead
+        of the ~90 s a full sequential scan would cost. All
         ``#T`` parsing routes through the hardened ``_parse_vcd_timestamp_token``
         (bounded digits, int64 cap), so a hostile timestamp yields a clean CLI
         error rather than a raw traceback.
@@ -2025,9 +2031,7 @@ class VCDParser:
         # _data_offset may be a text-mode tell() cookie (opaque, possibly larger
         # than file_size); clamp to a safe floor for the binary tail read.
         floor = self._data_offset if self._data_offset < file_size else 0
-        window = _env_int('VCD_ANALYZER_TAIL_WINDOW', 64 * 1024)
-        if window < 1:
-            window = 1
+        window = _TAIL_WINDOW
         t_max = None
         while t_max is None:
             start = max(floor, file_size - window)
@@ -3209,12 +3213,16 @@ def _unique_key(val):
     ~600 MB of strings alive for a 1 MB file. hash() is the string hash the
     set would compute anyway (no extra pass over the value, unlike a
     cryptographic digest, which cost ~5 us per 8 KiB value per tick). A
-    collision among the at most VCD_ANALYZER_MAX_UNIQUE_VALUES keys is
+    collision among the at most _MAX_UNIQUE_VALUES keys is
     ~1e-10 likely and would undercount by one; a tuple never equals a
     short value (str)."""
     if len(val) <= 32:
         return val
     return len(val), hash(val)
+
+
+# Distinct values counted exactly per signal; read per call (tests shrink it).
+_MAX_UNIQUE_VALUES = 65536
 
 
 def _summary_rows(vcd, t0, t1, sids):
@@ -3240,18 +3248,15 @@ def _summary_rows(vcd, t0, t1, sids):
     transitions only. x/z-related transitions still count as changes, but not
     as rises/falls.
 
-    The distinct-value count (`unique`) is exact up to
-    VCD_ANALYZER_MAX_UNIQUE_VALUES (default 65536, read per call like
-    VCD_ANALYZER_TOKEN_CHUNK_SIZE); beyond the cap it is a lower bound, and
-    the row says so: JSON `unique_is_exact: false` (the key appears only when
-    capped), text `uniq=N+`. This bounds memory on e.g. a 32-bit counter over
-    tens of millions of changes instead of keeping every value string alive.
+    The distinct-value count (`unique`) is exact up to _MAX_UNIQUE_VALUES
+    (65536); beyond the cap it is a lower bound, and the row says so: JSON
+    `unique_is_exact: false` (the key appears only when capped), text
+    `uniq=N+`. This bounds memory on e.g. a 32-bit counter over tens of
+    millions of changes instead of keeping every value string alive.
     """
     selected = _selected_sids(vcd, sids)
     init_boundary = 0 if t0 == 0 else t0 - 1
-    # Per-call env read so tests can shrink the cap via monkeypatch.setenv
-    # without reloading the module.
-    unique_cap = _env_int('VCD_ANALYZER_MAX_UNIQUE_VALUES', 65536)
+    unique_cap = _MAX_UNIQUE_VALUES
 
     # Baseline: {sid: val}. The stream fills in the state strictly before t0
     # (a late window neither replays nor decodes the head of the file); when

@@ -13,7 +13,6 @@ parser: every state point, every transition window, every command output.
 import argparse
 import contextlib
 import io
-import json
 import os
 import random
 import sys
@@ -184,18 +183,8 @@ def _commands_equal(raw, idx, path):
 
 
 def _native_build(path, sidecar, block_bytes):
-    env = dict(os.environ, VCD_ANALYZER_INDEX_THREADS='4',
-               VCD_ANALYZER_INDEX_PARALLEL_MIN='1')
-    saved = {k: os.environ.get(k) for k in env}
-    os.environ.update({k: v for k, v in env.items() if k != 'PATH'})
-    try:
-        return va.native_index_build(str(path), str(sidecar), block_bytes)
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+    return va.native_index_build(str(path), str(sidecar), block_bytes,
+                                 threads=4, parallel_min=1)
 
 
 @pytest.mark.parametrize('block_bytes', [17, 4096])

@@ -7,7 +7,11 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.6.1-3366cc?style=flat-square">
+  <b>English</b> &nbsp;|&nbsp; <a href="README_zh.md">中文</a>
+</p>
+
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.6.2-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.8+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
@@ -82,10 +86,10 @@ Two single files, no dependencies, Python 3.8+.
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # Pinned published release tag (recommended — avoids compatibility surprises from main)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.2/vcd_analyzer.py -o vcd_analyzer.py
 
 # Lite (pure Python, no index feature)
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.2/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
 
 python vcd_analyzer.py --version
 ```
@@ -151,6 +155,9 @@ and on every Python version.
   for any size on request.
 - **Queries use it automatically** whenever the sidecar is fresh; output is
   identical, only faster (minutes-long point lookups become sub-second).
+  A `--begin`/`--end` window reads only the blocks that can hold its signals'
+  changes, with the plain parser itself, plus the state before the window —
+  so even a window over the whole file costs about what a plain scan does.
 - **Block size is automatic.** A point query re-parses the indexed block it
   lands in, so small blocks keep queries fast (~0.1-0.2 s with 1 MiB blocks),
   while the index grows with every (signal, block) pair that saw a change.
@@ -322,5 +329,3 @@ Per-release details live in [CHANGELOG.md](CHANGELOG.md) and on the
 ## License
 
 MIT &mdash; see [LICENSE](LICENSE). &copy; 2026 neveltyc
-
-[中文说明](README_zh.md)

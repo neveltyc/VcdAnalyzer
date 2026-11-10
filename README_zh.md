@@ -7,7 +7,11 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/版本-1.6.1-3366cc?style=flat-square">
+  <a href="README.md">English</a> &nbsp;|&nbsp; <b>中文</b>
+</p>
+
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/版本-1.6.2-3366cc?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.8+-3366cc?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
@@ -78,10 +82,10 @@ python vcd_analyzer.py index sim.vcd
 curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/main/vcd_analyzer.py -o vcd_analyzer.py
 
 # 锁定已发布版本（推荐，避免 main 分支更新破坏兼容性）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.2/vcd_analyzer.py -o vcd_analyzer.py
 
 # 精简版（纯 Python，无索引功能）
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.2/vcd_analyzer_lite.py -o vcd_analyzer_lite.py
 
 python vcd_analyzer.py --version
 ```
@@ -144,6 +148,8 @@ python vcd_analyzer.py --limit 0 dump sim.vcd --filter 'u_dma.*' -o dma_changes.
   `--output PATH` 可存到别处（PATH 必须以 `.vcidx` 结尾）并软链接回
   `<file>.vcidx`；绝不删除已存在的普通文件，链接/构建失败只报告不致命。
 - **查询自动使用**新鲜的索引；输出完全一致，只是更快（分钟级点查询变亚秒级）。
+  `--begin`/`--end` 时间窗只读可能含有所选信号变化的块（用的就是纯扫描的
+  解析器），再加上窗口前的状态——即使窗口覆盖整个文件，开销也与纯扫描相当。
 - **块大小自动选择。** 点查询要重新解析它所在的索引块，块越小查询越快（1 MiB
   块约 0.1–0.2 秒）；而索引大小随"在块内有变化的（信号, 块）对"增长。构建从
   1 MiB 开始，只有索引超过 dump 的 2% 时才合并相邻块——常见 dump 保持 1 MiB
@@ -281,5 +287,3 @@ python -m unittest discover -s verify -p "test_cli.py"
 ## 许可证
 
 MIT —— 详见 [LICENSE](LICENSE)。&copy; 2026 neveltyc
-
-[English](README.md)

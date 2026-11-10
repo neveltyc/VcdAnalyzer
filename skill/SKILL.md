@@ -14,8 +14,8 @@ All commands support `--json` for structured output. **Always use `--json` when 
 ## Setup (one-time)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.1/vcd_analyzer.py -o vcd_analyzer.py
-python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.1
+curl -fsSL https://raw.githubusercontent.com/neveltyc/VcdAnalyzer/v1.6.2/vcd_analyzer.py -o vcd_analyzer.py
+python3 vcd_analyzer.py --version   # expect: vcd_analyzer 1.6.2
 ```
 
 No pip install, no virtualenv, no dependencies. Python 3.8+. (A

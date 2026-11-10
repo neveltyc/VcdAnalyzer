@@ -3,19 +3,22 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
-## Unreleased
+## [1.6.2](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.2) - 2026-11-10
 
 ### Changed
 
 - `search` and `summary` start at `--begin` instead of replaying from time 0: the change stream hands over the
-  state before the window, so with an index a late window decodes only its own blocks (a 5% window at the end of
-  a 17 MB always-active trace: 2.2 s -> 0.2 s; summary 0.8 s -> 0.25 s), and the plain parser skips emission
-  for the head of the file.
-- Indexed change streams hand off to the plain scan whenever the candidate blocks are at least 25% of the bytes
-  that scan would read (was: only full-file queries with no `--end`, at 80%); the index's decoder costs ~3.7x
-  more per byte, so a full-range `search` was 3.5x slower with an index than without one.
+  state before the window, so with an index a late window reads only its own blocks, and the plain parser skips
+  emission for the head of the file.
+- Indexed queries no longer have a decoder of their own: the candidate blocks are read in contiguous runs and fed
+  to the plain parser's state machine, seeded with the state before the window from the index. One grammar
+  implementation serves both paths, and a window over the whole file costs about what a plain scan does — the old
+  block decoder cost ~3.7x more per byte, which made a full-range `search` 3.5x slower with an index than without
+  one. On a 17 MB always-active trace: a 1.25% window at the end 2.2 s -> 0.15 s, the last 25% 2.2 s -> 0.32 s
+  (plain scan 0.64 s), `summary --begin` 0.8 s -> 0.15 s.
 - `--filter`, `--show` and `--condition` share one matcher: an exact full path selects only that signal, so
-  `--filter top.sig3` no longer also lists `top.sig30`..`top.sig39` (`top.sig3*` does).
+  `--filter top.sig3` no longer also lists `top.sig30`..`top.sig39` (`top.sig3*` does). Only glob patterns keep
+  the 256-character cap, so any full path can be named.
 - Exit status is grep-style: `search` exits 1 when it finds nothing; every error exits 2 (was 1, which `search`
   could not tell apart from a result).
 - The native index builder takes its thread count from the call (manifest) instead of the environment; `index
@@ -31,6 +34,12 @@ notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/rele
   already refused such a file).
 - A file with neither a `$var` declaration nor `$enddefinitions` is reported as "not a VCD file" (exit 2) instead
   of an empty waveform.
+- `native/build_all.sh` reported the macOS library as missing its ABI symbols (`strings` skips the Mach-O symbol
+  table); it now checks with `grep -a`.
+
+Validation: 380 tests pass on Python 3.13 (macOS), including a randomized index-vs-parser differential over 80
+generated dumps (block sizes 1 and 23, every selection, random windows); a one-off 400-dump run with four block sizes
+found no difference either. The embedded native libraries are the CI `native-dist` artifact.
 
 ## [1.6.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.1) - 2026-10-28
 

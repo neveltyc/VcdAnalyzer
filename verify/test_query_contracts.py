@@ -179,15 +179,43 @@ def test_errors_exit_two(vcd, tmp_path):
 
 def test_threads_reach_the_native_builder_as_an_argument(tmp_path, monkeypatch):
     src = write_vcd(tmp_path, minimal_vcd(DECLS, DATA, scope='top'))
+    seen = []
+    real = getattr(va, '_NATIVE_INDEX_BUILD', None)
+
+    def spy(*args, **kwargs):
+        seen.append(args[5:])
+        return real(*args, **kwargs) if real else None
+    monkeypatch.setattr(va, '_NATIVE_INDEX_BUILD', spy, raising=False)
     monkeypatch.delenv('VCD_ANALYZER_INDEX_THREADS', raising=False)
     import os
     before = dict(os.environ)
-    stats = va.build_index_best(str(src), str(tmp_path / 'a.vcidx'), threads=3)
+    va.build_index_best(str(src), str(tmp_path / 'a.vcidx'), threads=3)
+    monkeypatch.setenv('VCD_ANALYZER_INDEX_THREADS', '99')
+    va.build_index_best(str(src), str(tmp_path / 'b.vcidx'))
+    monkeypatch.setenv('VCD_ANALYZER_INDEX_PARALLEL_MIN', '7')
+    va.build_index_best(str(src), str(tmp_path / 'c.vcidx'))
+    monkeypatch.delenv('VCD_ANALYZER_INDEX_THREADS')
+    monkeypatch.delenv('VCD_ANALYZER_INDEX_PARALLEL_MIN')
     assert dict(os.environ) == before
-    if stats['builder'] != 'native':
-        pytest.skip('no native builder on this platform')
-    # A tiny file stays single-threaded below parallel_min, whatever is asked.
-    assert stats['threads'] == 1
-    stats = va.native_index_build(str(src), str(tmp_path / 'b.vcidx'), 1 << 20,
-                                  threads=2, parallel_min=1)
-    assert stats['threads'] >= 1
+    assert seen == [(3, va.NATIVE_PARALLEL_MIN), (16, va.NATIVE_PARALLEL_MIN), (16, 7)]
+    with pytest.raises(ValueError, match='threads'):
+        va.build_index_best(str(src), str(tmp_path / 'd.vcidx'), threads=-1)
+
+
+def test_long_exact_path_resolves_everywhere(tmp_path):
+    name = 'm' * 300
+    src = write_vcd(tmp_path, minimal_vcd('$var wire 1 ! {} $end\n'.format(name),
+                                          '#0\n0!\n#10\n1!\n', scope='top'))
+    path = 'top.' + name
+    assert run_cli(['search', src, '--condition', path + '=1',
+                    '--show', path]).returncode == 0
+    listed = run_cli(['--json', 'list', src, '--filter', path])
+    assert [s['path'] for s in load_json_stdout(listed.stdout)['signals']] == [path]
+    glob = run_cli(['list', src, '--filter', path + '*'])
+    assert glob.returncode == 2 and 'glob pattern too long' in glob.stderr
+
+
+def test_one_bit_overflow_message_has_no_signed_range(vcd):
+    r = run_cli(['search', vcd, '--condition', 'top.sig3=2'])
+    assert 'range is 0..1;' not in r.stderr and "two's complement" not in r.stderr
+    assert 'range is 0..1' in r.stderr

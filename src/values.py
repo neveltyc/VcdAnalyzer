@@ -144,9 +144,11 @@ def _normalize_filter_patterns(value):
         pat = str(raw).strip()
         if not pat:
             continue
-        if len(pat) > MAX_FILTER_PATTERN_LEN:
+        # Only a glob compiles to a regex; a plain pattern is an exact path or
+        # a substring test, linear in its length, and may be any full path.
+        if len(pat) > MAX_FILTER_PATTERN_LEN and ('*' in pat or '?' in pat):
             raise _FilterParseError(
-                'filter pattern too long; max length is {}'.format(MAX_FILTER_PATTERN_LEN))
+                'glob pattern too long; max length is {}'.format(MAX_FILTER_PATTERN_LEN))
         pat = re.sub(r'\*+', '*', pat)  # collapse `**` → `*`
         if pat.count('*') + pat.count('?') > MAX_FILTER_WILDCARDS:
             raise _FilterParseError(

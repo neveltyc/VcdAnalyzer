@@ -683,9 +683,11 @@ def _normalize_filter_patterns(value):
         pat = str(raw).strip()
         if not pat:
             continue
-        if len(pat) > MAX_FILTER_PATTERN_LEN:
+        # Only a glob compiles to a regex; a plain pattern is an exact path or
+        # a substring test, linear in its length, and may be any full path.
+        if len(pat) > MAX_FILTER_PATTERN_LEN and ('*' in pat or '?' in pat):
             raise _FilterParseError(
-                'filter pattern too long; max length is {}'.format(MAX_FILTER_PATTERN_LEN))
+                'glob pattern too long; max length is {}'.format(MAX_FILTER_PATTERN_LEN))
         pat = re.sub(r'\*+', '*', pat)  # collapse `**` → `*`
         if pat.count('*') + pat.count('?') > MAX_FILTER_WILDCARDS:
             raise _FilterParseError(
@@ -853,14 +855,14 @@ def _bus_bytes(bits):
     return bytearray(''.join(reversed(bits)), 'ascii')
 
 
-def _warn_time_regression(prev_t, new_t):
+def _warn_time_regression(path, prev_t, new_t):
     """IEEE 1364 requires simulation_time to be non-decreasing. A dump that
     steps back still parses, but every time-windowed answer (state at T,
     --begin/--end windows, search spans) assumes order, so say so once
     instead of answering silently. The index builder refuses such a file."""
     _warn('timestamps go backwards (#{} after #{}); this VCD is not time-ordered, '
           'so time-based results may be wrong'.format(new_t, prev_t),
-          cat='time_regression')
+          cat=('time_regression', path))
 
 
 class VCDParser:
@@ -1293,37 +1295,26 @@ class VCDParser:
         raw_pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
         if not raw_pats:
             return None
+        plain = [pat for pat in raw_pats if '*' not in pat and '?' not in pat]
+        globs = [_glob_lite_regex(pat) for pat in raw_pats if '*' in pat or '?' in pat]
+        exact = {pat: set() for pat in plain}
+        substr = {pat: set() for pat in plain}
         out = set()
-        exact = {pat: set() for pat in raw_pats if '*' not in pat and '?' not in pat}
-        if exact:
-            for sid, info in self.signals.items():
-                for path in info['aliases']:
-                    hits = exact.get(path.lower())
-                    if hits is not None:
-                        hits.add(sid)
-            for hits in exact.values():
-                out.update(hits)
-        pats = []
-        for pat in raw_pats:
-            if pat not in exact:
-                pats.append(('glob', _glob_lite_regex(pat)))
-            elif not exact[pat]:
-                pats.append(('substr', pat))
-        if not pats:
-            return out
+        # One pass: each plain pattern collects its exact and substring hits
+        # side by side and keeps the exact ones when there are any.
         for sid, info in self.signals.items():
-            if sid in out:
-                continue
             for path in info['aliases']:
                 pl = path.lower()
-                hit = False
-                for kind, pat in pats:
-                    hit = pat.match(pl) is not None if kind == 'glob' else pat in pl
-                    if hit:
+                for pat in plain:
+                    if pat in pl:
+                        substr[pat].add(sid)
+                        if pat == pl:
+                            exact[pat].add(sid)
+                for rx in globs:
+                    if rx.match(pl) is not None:
                         out.add(sid)
-                        break
-                if hit:
-                    break
+        for pat in plain:
+            out.update(exact[pat] or substr[pat])
         return out
 
     def _data_token_lists(self, chunk_size=None):
@@ -1829,7 +1820,7 @@ class VCDParser:
                         # per bit change.
                         _cross_into_window()
                     if new_t < cur_t:
-                        _warn_time_regression(cur_t, new_t)
+                        _warn_time_regression(self.path, cur_t, new_t)
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -3009,7 +3000,9 @@ def build_index_best(path, sidecar, block_bytes=None, threads=None):
     if os.environ.get('VCD_ANALYZER_FAIL_INDEX'):
         raise ValueError('simulated index failure (VCD_ANALYZER_FAIL_INDEX)')
     if threads is None:
-        threads = _env_int('VCD_ANALYZER_INDEX_THREADS', 0)
+        threads = min(_env_int('VCD_ANALYZER_INDEX_THREADS', 0), 16)
+    elif not 0 <= threads <= 16:
+        raise ValueError('threads must be 0 (automatic) .. 16; got {}'.format(threads))
     parallel_min = _env_int('VCD_ANALYZER_INDEX_PARALLEL_MIN', NATIVE_PARALLEL_MIN)
     budget = cap = None
     if block_bytes is None:
@@ -4264,9 +4257,11 @@ def _fit_target_to_width(c):
         if target_int >> width:
             raise _ConditionParseError(
                 'condition {!r}: {} does not fit signal {} (width {}); the '
-                'range is 0..{} (or {}..-1 as two\'s complement)'.format(
+                'range is 0..{}{}'.format(
                     c['original'], c['value_text'], c['path'], width,
-                    (1 << width) - 1, -(1 << (width - 1))))
+                    (1 << width) - 1,
+                    " (or {}..-1 as two's complement)".format(-(1 << (width - 1)))
+                    if width > 1 else ''))
         return
     if target_int < -(1 << (width - 1)):
         raise _ConditionParseError(
@@ -20404,7 +20399,7 @@ def _load_native_library():
 
 
 def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0, max_block_bytes=0,
-                        threads=0, parallel_min=64 << 20):
+                        threads=0, parallel_min=NATIVE_PARALLEL_MIN):
     """Build the sidecar natively. None when no usable library (the caller
     falls back to the pure-Python builder); ValueError for fatal build
     errors (non-monotonic timestamps, changed source) so they surface

@@ -71,8 +71,10 @@ def test_overwide_and_formatting():
 
 def test_filter_normalization_and_glob_lite():
     assert va._normalize_filter_patterns('**data[7:0],clk') == ['*data[7:0]', 'clk']
+    # Only globs are length-capped; a plain pattern may be any full path.
+    assert va._normalize_filter_patterns('x' * 300) == ['x' * 300]
     with pytest.raises(va._FilterParseError):
-        va._normalize_filter_patterns('x' * 300)
+        va._normalize_filter_patterns('x' * 300 + '*')
     with pytest.raises(va._FilterParseError):
         va._normalize_filter_patterns('a*' * 20)
     with pytest.raises(va._FilterParseError):

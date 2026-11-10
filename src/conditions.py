@@ -515,9 +515,11 @@ def _fit_target_to_width(c):
         if target_int >> width:
             raise _ConditionParseError(
                 'condition {!r}: {} does not fit signal {} (width {}); the '
-                'range is 0..{} (or {}..-1 as two\'s complement)'.format(
+                'range is 0..{}{}'.format(
                     c['original'], c['value_text'], c['path'], width,
-                    (1 << width) - 1, -(1 << (width - 1))))
+                    (1 << width) - 1,
+                    " (or {}..-1 as two's complement)".format(-(1 << (width - 1)))
+                    if width > 1 else ''))
         return
     if target_int < -(1 << (width - 1)):
         raise _ConditionParseError(

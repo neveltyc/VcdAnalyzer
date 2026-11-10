@@ -279,7 +279,7 @@ def _load_native_library():
 
 
 def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0, max_block_bytes=0,
-                        threads=0, parallel_min=64 << 20):
+                        threads=0, parallel_min=NATIVE_PARALLEL_MIN):
     """Build the sidecar natively. None when no usable library (the caller
     falls back to the pure-Python builder); ValueError for fatal build
     errors (non-monotonic timestamps, changed source) so they surface

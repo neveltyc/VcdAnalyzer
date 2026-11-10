@@ -134,14 +134,14 @@ def _bus_bytes(bits):
     return bytearray(''.join(reversed(bits)), 'ascii')
 
 
-def _warn_time_regression(prev_t, new_t):
+def _warn_time_regression(path, prev_t, new_t):
     """IEEE 1364 requires simulation_time to be non-decreasing. A dump that
     steps back still parses, but every time-windowed answer (state at T,
     --begin/--end windows, search spans) assumes order, so say so once
     instead of answering silently. The index builder refuses such a file."""
     _warn('timestamps go backwards (#{} after #{}); this VCD is not time-ordered, '
           'so time-based results may be wrong'.format(new_t, prev_t),
-          cat='time_regression')
+          cat=('time_regression', path))
 
 
 class VCDParser:
@@ -574,37 +574,26 @@ class VCDParser:
         raw_pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
         if not raw_pats:
             return None
+        plain = [pat for pat in raw_pats if '*' not in pat and '?' not in pat]
+        globs = [_glob_lite_regex(pat) for pat in raw_pats if '*' in pat or '?' in pat]
+        exact = {pat: set() for pat in plain}
+        substr = {pat: set() for pat in plain}
         out = set()
-        exact = {pat: set() for pat in raw_pats if '*' not in pat and '?' not in pat}
-        if exact:
-            for sid, info in self.signals.items():
-                for path in info['aliases']:
-                    hits = exact.get(path.lower())
-                    if hits is not None:
-                        hits.add(sid)
-            for hits in exact.values():
-                out.update(hits)
-        pats = []
-        for pat in raw_pats:
-            if pat not in exact:
-                pats.append(('glob', _glob_lite_regex(pat)))
-            elif not exact[pat]:
-                pats.append(('substr', pat))
-        if not pats:
-            return out
+        # One pass: each plain pattern collects its exact and substring hits
+        # side by side and keeps the exact ones when there are any.
         for sid, info in self.signals.items():
-            if sid in out:
-                continue
             for path in info['aliases']:
                 pl = path.lower()
-                hit = False
-                for kind, pat in pats:
-                    hit = pat.match(pl) is not None if kind == 'glob' else pat in pl
-                    if hit:
+                for pat in plain:
+                    if pat in pl:
+                        substr[pat].add(sid)
+                        if pat == pl:
+                            exact[pat].add(sid)
+                for rx in globs:
+                    if rx.match(pl) is not None:
                         out.add(sid)
-                        break
-                if hit:
-                    break
+        for pat in plain:
+            out.update(exact[pat] or substr[pat])
         return out
 
     def _data_token_lists(self, chunk_size=None):
@@ -1110,7 +1099,7 @@ class VCDParser:
                         # per bit change.
                         _cross_into_window()
                     if new_t < cur_t:
-                        _warn_time_regression(cur_t, new_t)
+                        _warn_time_regression(self.path, cur_t, new_t)
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return

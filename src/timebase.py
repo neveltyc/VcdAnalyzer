@@ -188,32 +188,48 @@ def _parse_timescale_strict(text):
     return n * _UNITS[m.group(2)]
 
 
-class _TimeParseError(ValueError):
+# Exit status, grep-style: 0 = answered (search: found), 1 = search found
+# nothing (_EXIT_NO_MATCH), 2 = error (argparse usage errors use 2 as well),
+# 3 = terminal output cut (_EXIT_OUTPUT_CUT).
+_EXIT_ERROR = 2
+
+
+class _UserError(Exception):
+    """A failure the user can act on: main() prints 'Error: <message>' and
+    exits with _EXIT_ERROR, no traceback. Every user-facing error class
+    derives from it, so main() handles them in one place."""
+
+
+class _TimeParseError(_UserError, ValueError):
     """Raised by parse_time on invalid input; caught in main() for friendly CLI errors."""
 
 
-class _LimitParseError(ValueError):
+class _LimitParseError(_UserError, ValueError):
     """Raised when --limit is invalid (e.g. negative). Separate from
     _TimeParseError so the two validation failures never share a message
     identity; caught in main() for a friendly CLI error."""
 
 
-class _FilterParseError(argparse.ArgumentTypeError):
+class _FilterParseError(_UserError, argparse.ArgumentTypeError):
     """Raised when --filter contains an unsafe or unsupported pattern.
     argparse handles this automatically with a friendly message."""
 
 
-class _ValueParseError(ValueError):
+class _ValueParseError(_UserError, ValueError):
     """Raised when a target value is too large or malformed beyond tolerant matching."""
 
 
-class _ConditionParseError(ValueError):
+class _ConditionParseError(_UserError, ValueError):
     """Raised when search --condition / --show / --changed is invalid."""
 
 
-class _VCDResourceError(RuntimeError):
+class _VCDResourceError(_UserError, RuntimeError):
     """Raised when a VCD input exceeds configured resource limits.
     Surfaced in main() as a CLI error, no Python traceback."""
+
+
+class _VCDFormatError(_UserError):
+    """The input is not a VCD file (no declarations, no $enddefinitions)."""
 
 
 def _check_time_range(ticks, original):

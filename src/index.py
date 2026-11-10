@@ -457,6 +457,7 @@ class IndexedVCD(VCDParser):
             self.blocks = [BLOCK.unpack_from(
                 self.mapping, HEADER.size + k * BLOCK.size) for k in range(nb)]
             self.ends = [b[3] for b in self.blocks]
+            self._block_starts = [b[2] for b in self.blocks]
             prev_end = -1
             for _s, _e, t0, t1 in self.blocks:
                 if t1 < t0 or t0 < prev_end or _e < _s:
@@ -544,7 +545,7 @@ class IndexedVCD(VCDParser):
         blocks = set()
         ranges = set()
         first = bisect.bisect_left(self.ends, t0)
-        last=len(self.blocks)-1 if t1 is None else bisect.bisect_right([b[2] for b in self.blocks],t1)-1
+        last=len(self.blocks)-1 if t1 is None else bisect.bisect_right(self._block_starts,t1)-1
         for sym in required:
             location, count, flags = DIRECTORY.unpack_from(
                 self.mapping, self.directory_start+self.raw_id[sym]*DIRECTORY.size)
@@ -636,6 +637,11 @@ class IndexedVCD(VCDParser):
                 i+=1
         return found
     POINT_GROUP_SPAN = 1 << 16
+    # Candidate bytes / plain-scan bytes at or above which a change stream
+    # runs on the plain parser (see _iter_changes). The position-aware
+    # decoder measured ~3.7x the plain scan's cost per byte (17 MB synthetic
+    # trace, an always-active signal: break-even at a ~20-25% window).
+    SOURCE_SCAN_RATIO = 0.25
     @staticmethod
     def _record_in_buffer(buf, rel, sym):
         """Decode the value_change whose opener token starts at buf[rel].
@@ -753,10 +759,10 @@ class IndexedVCD(VCDParser):
             return super().state_at(t_at,sids)
     def state_pair(self,ta,tb,sids=None):
         return self.state_at(ta,sids),self.state_at(tb,sids)
-    def _iter_changes(self,t0=0,t1=None,sids=None):
+    def _iter_changes(self,t0=0,t1=None,sids=None,baseline=None):
         if self._gate_rejects():
             self.counters['gate_rejected']=True
-            yield from super()._iter_changes(t0,t1,sids)
+            yield from super()._iter_changes(t0,t1,sids,baseline)
             return
         required=self.selected_raw(sids)
         if not required:return
@@ -771,18 +777,27 @@ class IndexedVCD(VCDParser):
             candidates=self.candidate_blocks(required,t0,t1,include_range=needs_bus)
         except _CorruptSidecarError:
             self.counters['corrupt_fallback']=True
-            yield from super()._iter_changes(t0,t1,sids)
+            yield from super()._iter_changes(t0,t1,sids,baseline)
             return
-        # When all of the file is relevant, its existing split-based scanner
-        # is faster than the experimental position-aware decoder.
-        if t0==0 and t1 is None and sum(self.blocks[b][1]-self.blocks[b][0] for b in candidates)>=0.8*(self.file_size-self.begin_offset):
+        # The plain scan reads from the data start through the block holding
+        # t1, whatever t0 is; the position-aware decoder reads only the
+        # candidate blocks but costs several times more per byte. When the
+        # candidates are most of what the plain scan would read anyway (an
+        # always-active signal over a wide window), the plain scan wins.
+        scan_end=(self.file_size if t1 is None else
+                  self.blocks[max(0,bisect.bisect_right(self._block_starts,t1)-1)][1]
+                  if self.blocks else self.file_size)
+        if (sum(self.blocks[b][1]-self.blocks[b][0] for b in candidates)
+                >=self.SOURCE_SCAN_RATIO*(scan_end-self.begin_offset)):
             self.counters['fallback_to_source']=True
             self.counters['bytes_is_estimate']=True
-            self.counters['bytes']+=self.file_size-self._data_offset
-            yield from super()._iter_changes(t0,t1,sids)
+            self.counters['bytes']+=scan_end-self._data_offset
+            yield from super()._iter_changes(t0,t1,sids,baseline)
             return
         raw=self.raw_at(t0-1,required)
         previous=self.fold_raw(raw,sids)
+        if baseline is not None:
+            baseline.update(previous)
         selected=set(self.signals) if sids is None else sids
         vec_width=self._vec_width
         # MSB-first bytearrays, as in VCDParser._iter_changes: one byte store
@@ -859,12 +874,17 @@ class IndexedVCD(VCDParser):
 
 
 
+# Smallest data section the native builder splits across threads.
+NATIVE_PARALLEL_MIN = 64 << 20
+
+
 def sidecar_path(vcd_path):
     return str(vcd_path) + '.vcidx'
 
 
 def native_index_build(path, sidecar, block_bytes, max_index_bytes=None,
-                       max_block_bytes=None):
+                       max_block_bytes=None, threads=0,
+                       parallel_min=NATIVE_PARALLEL_MIN):
     """Build via the embedded native library (full variant only).
 
     Fully automatic: the pure-Python builder is the fallback for every
@@ -878,7 +898,7 @@ def native_index_build(path, sidecar, block_bytes, max_index_bytes=None,
     built = '{}.native.{}'.format(sidecar, os.getpid())
     try:
         stats = build(path, built, block_bytes, max_index_bytes or 0,
-                      max_block_bytes or 0)
+                      max_block_bytes or 0, threads, parallel_min)
         if stats is None:
             return None
         _seal_sidecar(path, built, sidecar)
@@ -894,18 +914,23 @@ def native_index_build(path, sidecar, block_bytes, max_index_bytes=None,
 def build_index_best(path, sidecar, block_bytes=None, threads=None):
     """Native build when the running file carries one, pure Python else.
     block_bytes None picks the block size automatically (AUTO_BLOCK_BYTES,
-    coarsened to index_budget()); an explicit size is used as given."""
+    coarsened to index_budget()); an explicit size is used as given.
+    threads None reads VCD_ANALYZER_INDEX_THREADS (0/unset = automatic);
+    the native builder receives it as an argument, never via the
+    environment."""
     if os.environ.get('VCD_ANALYZER_FAIL_INDEX'):
         raise ValueError('simulated index failure (VCD_ANALYZER_FAIL_INDEX)')
-    if threads is not None:
-        os.environ['VCD_ANALYZER_INDEX_THREADS'] = str(threads)
+    if threads is None:
+        threads = _env_int('VCD_ANALYZER_INDEX_THREADS', 0)
+    parallel_min = _env_int('VCD_ANALYZER_INDEX_PARALLEL_MIN', NATIVE_PARALLEL_MIN)
     budget = cap = None
     if block_bytes is None:
         block_bytes = AUTO_BLOCK_BYTES
         budget = index_budget(os.path.getsize(path))
         cap = AUTO_MAX_BLOCK_BYTES
     try:
-        stats = native_index_build(path, sidecar, block_bytes, budget, cap)
+        stats = native_index_build(path, sidecar, block_bytes, budget, cap,
+                                   threads, parallel_min)
     except ValueError as error:
         # The native builder is ASCII-only and refuses some exotic tokens;
         # and build-fatal conditions (non-monotonic timestamps) re-raise
@@ -916,11 +941,12 @@ def build_index_best(path, sidecar, block_bytes=None, threads=None):
     if stats is not None:
         stats['builder'] = 'native'
         return stats
-    if os.environ.get('VCD_ANALYZER_INDEX_THREADS'):
-        # Works identically on both variants; the thread count only feeds
-        # the native builder, so say so instead of silently ignoring it.
-        _warn('VCD_ANALYZER_INDEX_THREADS is ignored: no native builder '
-              'is available on this platform', cat='index_threads_hint')
+    if threads:
+        # The thread count only feeds the native builder, so say so instead
+        # of silently ignoring it.
+        _warn('the index thread count (--threads / VCD_ANALYZER_INDEX_THREADS) '
+              'is ignored: no native builder is available on this platform',
+              cat='index_threads_hint')
     stats = build_index(path, sidecar, block_bytes, budget, cap)
     stats['builder'] = 'python'
     return stats
@@ -1204,12 +1230,12 @@ def _build_index_command(vcd, args):
         # leave unrecognizable binary files on disk and invite confusion
         # with the waveform itself.
         if not target.endswith('.vcidx'):
-            sys.exit('Error: --output must end with .vcidx '
-                     '(e.g. --output {}{})'.format(target, '.vcidx'))
+            raise _UserError('--output must end with .vcidx '
+                             '(e.g. --output {}{})'.format(target, '.vcidx'))
         # --output pointing at the input VCD would REPLACE the waveform
         # with the sidecar at publication; --force must not bypass this.
         if _same_file(target, args.file):
-            sys.exit('Error: --output must not be the VCD file itself')
+            raise _UserError('--output must not be the VCD file itself')
     auto = bool(getattr(args, 'auto', False))
     lock_fd = None
     if auto:
@@ -1220,7 +1246,7 @@ def _build_index_command(vcd, args):
             return _BUILD_BUSY
     try:
         if os.path.exists(target) and not (args.force or auto):
-            sys.exit('Error: {} already exists; use --force to rebuild'.format(target))
+            raise _UserError('{} already exists; use --force to rebuild'.format(target))
         block_bytes = args.block_mib << 20 if args.block_mib else None
         try:
             stats = build_index_best(args.file, target, block_bytes,
@@ -1228,7 +1254,7 @@ def _build_index_command(vcd, args):
         except (ValueError, _VCDResourceError, struct.error, KeyError) as error:
             # Builders publish atomically and clean their OWN temp files;
             # a failed rebuild must leave a pre-existing target untouched.
-            sys.exit('Error: cannot index {}: {}'.format(args.file, error))
+            raise _UserError('cannot index {}: {}'.format(args.file, error))
         if args.output:
             _link_sidecar(sidecar, target)
     finally:
@@ -1297,6 +1323,8 @@ def cmd_index(vcd, args):
         if _build_index_command(vcd, args) is _BUILD_BUSY:
             sys.stderr = stderr
             return  # another builder owns the build (and its log)
+    except _UserError as error:
+        failure = 'Error: {}'.format(error)
     except SystemExit as stop:
         if stop.code not in (None, 0):
             failure = stop.code if isinstance(stop.code, str) \
@@ -1318,7 +1346,7 @@ def cmd_index(vcd, args):
                 captured.getvalue(), str(failure).rstrip()))
     except OSError:
         pass
-    sys.exit(1)
+    return _EXIT_ERROR
 
 
 def _link_sidecar(sidecar, target):

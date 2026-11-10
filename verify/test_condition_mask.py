@@ -94,8 +94,12 @@ def test_over_wide_mask_trims_dont_care_and_zero_excess(vcd):
     assert c['target_raw'] == '??????1?'
 
 
-def test_over_wide_mask_with_a_set_excess_bit_never_matches(vcd):
-    assert spans(search(vcd, 'bus=b1????????')) == []
+def test_over_wide_mask_with_a_set_excess_bit_is_rejected(vcd):
+    # A set bit above the width can never match (and `!=` would always
+    # hold), so the question is rejected instead of answered "no interval".
+    for op in ('=', '!='):
+        with pytest.raises(va._ConditionParseError, match='above bit 7'):
+            search(vcd, 'bus{}b1????????'.format(op))
 
 
 # --- inequality -------------------------------------------------------------
@@ -111,13 +115,11 @@ def test_not_equal_blocked_by_x_in_a_cared_bit(vcd):
     assert spans(search(vcd, 'bus!=b????1???')) == [(0, 20), (50, 60)]
 
 
-def test_not_equal_over_wide_mask_agrees_with_plain_literal(vcd):
-    # A set bit above the width makes the mask unequal to every value, so `!=`
-    # holds wherever the cared in-width bits are known -- exactly what a plain
-    # over-wide literal answers. (The bit-3 x at 40ns blocks only the mask with
-    # bit 3 cared.)
-    assert spans(search(vcd, 'bus!=b1????????')) == [(0, 60)]
-    assert spans(search(vcd, 'bus!=b1????1???')) == [(0, 40), (50, 60)]
+def test_not_equal_over_wide_mask_agrees_with_plain_literal():
+    # The matcher itself (direct callers, no resolve-time check): a set bit
+    # above the width makes the mask unequal to every value, so `!=` holds
+    # wherever the cared in-width bits are known -- exactly what a plain
+    # over-wide literal answers.
     assert va._condition_match('1010', '!=', '1????????', None, width=8)
     assert va._condition_match('1010', '!=', '100001010', None, width=8)
 

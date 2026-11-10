@@ -102,7 +102,8 @@ python vcd_analyzer.py --version
 | `index` | 构建可选的 `.vcidx` 索引，让巨型文件的点查询瞬间完成（完整版） |
 
 所有命令支持 `--begin` / `--end` 时间窗口（带单位：`fs`/`ps`/`ns`/`us`/`ms`/`s`），
-`--filter` 子串或通配符过滤，以及 `--json` 结构化输出。
+`--filter` 完整路径精确匹配、子串或通配符过滤，以及 `--json` 结构化输出。
+`search` 找到结果退出码为 0，没找到为 1；出错为 2。
 
 运行 `python vcd_analyzer.py --help` 查看完整参考。
 

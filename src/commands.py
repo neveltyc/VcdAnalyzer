@@ -349,6 +349,7 @@ def cmd_compare(vcd, args):
 
 
 def cmd_search(vcd, args):
+    """Returns _EXIT_NO_MATCH when nothing matched (grep-style status)."""
     ts = vcd.ts_sec
     t0 = parse_time(args.begin, ts) if args.begin else 0
     t1_raw = parse_time(args.end, ts) if args.end else None
@@ -416,6 +417,10 @@ def cmd_search(vcd, args):
         # SEVERAL signals to transition together is the exception: coincidence
         # is a property of the tick, not of any one record, so such a clause
         # reports the tick once.
+        # Baseline: settled state strictly before t0. Event mode reports
+        # changes within [t0, t1], so a change landing exactly at t0 is
+        # in-window — unlike interval mode's baseline AT t0 (level
+        # semantics) below; do not unify.
         state = {}
         events = _ResultRows() if limit == 0 else []
         total = 0
@@ -431,16 +436,7 @@ def cmd_search(vcd, args):
                 by_edge_sid.setdefault(edge_sids[0], []).append(cl)
 
         stop = False
-        for gt, group in _transition_groups(vcd, 0, t1, selected):
-            if gt < t0:
-                # Baseline: settled state strictly before t0. Event mode reports
-                # changes within [t0, t1], so a change landing exactly at t0 is
-                # in-window — this `< t0` deliberately differs from interval
-                # mode's `<= t0` (level semantics) below; do not unify.
-                for gsid, _gprev, gval, _gkind in group:
-                    state[gsid] = gval
-                continue
-
+        for gt, group in _transition_groups(vcd, t0, t1, selected, baseline=state):
             # A change is an event-var trigger (every record counts) or a real
             # value transition; a first observation (prev is None) is not a
             # change, matching the pre-1.3.20 contract.
@@ -498,7 +494,7 @@ def cmd_search(vcd, args):
             obj.update(_trunc_hint(truncated, len(events), total, False, 'events'))
             obj.update(_total_json_fields(total, truncated))
             _json(obj)
-            return
+            return None if events else _EXIT_NO_MATCH
         if events:
             print('Found: {} event(s)'.format(_count_label(len(events), total, truncated)))
             for e in events:
@@ -508,12 +504,13 @@ def cmd_search(vcd, args):
         else:
             print('No event in {}..{} where {}.'.format(
                 fmt_time(t0, ts), fmt_time(t1, ts), cond_text))
-        return
+            return _EXIT_NO_MATCH
+        return None
 
     # Interval/segment mode. A segment is an interval further split whenever
     # the displayed show-value tuple changes while the condition remains true.
     has_show = bool(show_sids)
-    # Single-pass: build state up to t0, then process intervals t0+..t1
+    # Single pass over (t0, t1]; the stream supplies the state at t0.
     state = {}
     results = _ResultRows() if limit == 0 else []
     total = 0
@@ -542,13 +539,10 @@ def cmd_search(vcd, args):
     # evaluation): _event_groups yields every value_change at one timestamp as a
     # group, which is applied together before the condition is evaluated once on
     # the resulting settled state. Reusing it removes the hand-rolled cur_t/group
-    # regrouping and its duplicate 'final pending group' tail.
-    for gt, ggroup in _event_groups(vcd, 0, t1, selected):
-        if gt <= t0:
-            for gsid, gval in ggroup:
-                state[gsid] = gval
-            continue
-
+    # regrouping and its duplicate 'final pending group' tail. The baseline is
+    # the settled state AT t0 (strictly before t0 + 1), filled in by the stream
+    # itself so a late window neither replays nor decodes the head of the file.
+    for gt, ggroup in _event_groups(vcd, t0 + 1, t1, selected, baseline=state):
         if not init_checks_done:
             active = _any_clause_holds(state, clauses)
             seg_start = t0 if active else None
@@ -635,7 +629,7 @@ def cmd_search(vcd, args):
                key: results}
         obj.update(_total_json_fields(total, truncated))
         _json(obj)
-        return
+        return None if results else _EXIT_NO_MATCH
 
     noun = 'segment' if has_show else 'interval'
     if results:
@@ -651,4 +645,6 @@ def cmd_search(vcd, args):
     else:
         print('No {} in {}..{} where {}.'.format(
             noun, fmt_time(t0, ts), fmt_time(t1, ts), cond_text))
+        return _EXIT_NO_MATCH
+    return None
 

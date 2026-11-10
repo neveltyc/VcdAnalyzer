@@ -54,7 +54,9 @@ def _summary_rows(vcd, t0, t1, sids):
     # without reloading the module.
     unique_cap = _env_int('VCD_ANALYZER_MAX_UNIQUE_VALUES', 65536)
 
-    # Baseline: {sid: val} — cheap str overwrites, same as state_at.
+    # Baseline: {sid: val}. The stream fills in the state strictly before t0
+    # (a late window neither replays nor decodes the head of the file); when
+    # the window starts at 0 the t=0 records join it in the loop below.
     # Stats dicts are created only once per signal, not on every baseline event.
     baseline = {}
     stats = {}
@@ -72,7 +74,7 @@ def _summary_rows(vcd, t0, t1, sids):
             'scalar': is_scalar,
         }
 
-    for t, sid, prev, val, kind in vcd.iter_transitions(0, t1, selected):
+    for t, sid, prev, val, kind in vcd.iter_transitions(t0, t1, selected, baseline):
         is_event = kind == 'event'
         if t <= init_boundary and not (is_event and t >= t0):
             baseline[sid] = val

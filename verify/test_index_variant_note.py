@@ -56,7 +56,7 @@ def test_lite_index_pointer_for_every_invocation(tmp_path):
     open(va.sidecar_path(src), 'wb').close()
     for extra in ([], ['--force'], ['--auto']):
         result = _run(LITE, ['index', str(src)] + extra)
-        assert result.returncode == 1, extra
+        assert result.returncode == 2, extra
         assert 'full vcd_analyzer.py only' in result.stderr, extra
         assert 'Traceback' not in result.stderr, extra
 

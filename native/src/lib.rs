@@ -18,7 +18,12 @@
 //   budget_bytes <u64>          (0 = none; see "index budget" below)
 //   max_block_bytes <u64>       (0 = no cap on budget coarsening)
 //   max_token_len <usize>
+//   threads <usize>             (0 = automatic: min(4, cores); capped at 16)
+//   parallel_min <u64>          (smallest data section split across threads)
 //   symbols <count>
+//
+// Every build parameter arrives here: the library reads no environment
+// variables, so a host process configures it explicitly, per call.
 //   <symbol id code>            (one per line, raw_symbols() order)
 //
 // Output: a VCDIDX02 sidecar — same header/block/directory layout as
@@ -652,6 +657,8 @@ pub fn build_from_manifest(
     let budget_bytes = next_num("budget_bytes")?;
     let max_block_bytes_cap = next_num("max_block_bytes")?;
     let max_token_len = next_num("max_token_len")? as usize;
+    let threads_req = next_num("threads")? as usize;
+    let parallel_min = next_num("parallel_min")?;
     let sym_count = next_num("symbols")? as usize;
     if block_bytes == 0 || block_bytes > (4096u64 << 20) {
         die!("block_bytes must be between 1 MiB-equivalent and 4096 MiB (u32 offsets)");
@@ -675,19 +682,15 @@ pub fn build_from_manifest(
     // -- thread plan --------------------------------------------------------
     // The scan is single-threaded by default on small files; on big ones the
     // data section is split at TIMESTAMP boundaries and parsed by up to
-    // VCD_ANALYZER_INDEX_THREADS workers (default: min(4, cores)). A '#T'
+    // `threads` workers (manifest; 0 = min(4, cores)). A '#T'
     // split point is always equivalent to the sequential scan: the token
     // before it either completes a record (workers agree) or is an opener
     // whose operand is that '#T' — structurally consumed and dropped in
     // BOTH executions, with the '#T' then read as a timestamp. Per-block
     // postings depend only on the bytes inside the block, so merged results
     // are identical up to block-grid placement (queries don't care).
-    let threads_env = std::env::var("VCD_ANALYZER_INDEX_THREADS").ok()
-        .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let threads = if threads_env == 0 { cores.min(4) } else { threads_env.min(16) };
-    let parallel_min = std::env::var("VCD_ANALYZER_INDEX_PARALLEL_MIN").ok()
-        .and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(64 << 20);
+    let threads = if threads_req == 0 { cores.min(4) } else { threads_req.min(16) };
 
     let symtab = SymTab::new(&symbols);
     let mut splits: Vec<u64> = vec![data_start];
@@ -956,7 +959,7 @@ fn put_u64(w: &mut BufWriter<File>, v: u64) -> Result<(), String> { w.write_all(
 
 use std::ffi::CStr;
 
-pub const ABI_VERSION: c_uint = 2; // 2: manifest carries budget_bytes
+pub const ABI_VERSION: c_uint = 3; // 2: manifest carries budget_bytes; 3: threads, parallel_min
 
 fn write_cstr(dst: *mut c_char, cap: usize, text: &str) {
     if dst.is_null() || cap == 0 { return; }

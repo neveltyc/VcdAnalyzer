@@ -100,20 +100,24 @@ def test_main_dispatches_common_commands(monkeypatch, capsys, tmp_path):
         assert expected in out
 
 
-def test_main_friendly_file_errors(monkeypatch, tmp_path):
+def test_main_friendly_file_errors(monkeypatch, tmp_path, capsys):
     missing = tmp_path / 'missing.vcd'
     monkeypatch.setattr('sys.argv', ['vcd_analyzer.py','info',str(missing)])
     with pytest.raises(SystemExit) as e:
         va.main()
-    assert 'cannot open VCD file' in str(e.value)
+    assert e.value.code == va._EXIT_ERROR
+    assert 'Error: cannot open VCD file' in capsys.readouterr().err
 
     monkeypatch.setattr('sys.argv', ['vcd_analyzer.py','info',str(tmp_path)])
     with pytest.raises(SystemExit) as e2:
         va.main()
-    assert 'not a file' in str(e2.value) or 'permission denied' in str(e2.value)
+    err = capsys.readouterr().err
+    assert e2.value.code == va._EXIT_ERROR
+    assert 'not a file' in err or 'permission denied' in err
 
     good = make_vcd(tmp_path)
     monkeypatch.setattr('sys.argv', ['vcd_analyzer.py','dump',str(good),'--begin','bad'])
     with pytest.raises(SystemExit) as e3:
         va.main()
-    assert 'Error:' in str(e3.value)
+    assert e3.value.code == va._EXIT_ERROR
+    assert 'Error:' in capsys.readouterr().err

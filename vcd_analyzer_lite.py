@@ -24,10 +24,14 @@ Global options:
                On an interactive terminal, stdout output stops after 1 MiB (exit status 3);
                pipes and redirects receive everything.
 
+Exit status: 0 = success (search: found), 1 = search found nothing, 2 = error,
+             3 = terminal output cut.
+
 Argument formats:
   <file>          VCD file path
-  --filter K1,K2  Comma-separated patterns. Plain text uses case-insensitive substring match;
-                  patterns containing * or ? use case-insensitive glob match.
+  --filter K1,K2  Comma-separated, case-insensitive patterns. A full signal path selects
+                  that signal only (top.sig3, not top.sig30); other plain text matches as
+                  a substring; patterns containing * or ? use glob match.
                   e.g. --filter clk,rst   --filter '*_valid,*_ready,*_data'   --filter 'top.u_dma.*'
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
@@ -41,7 +45,8 @@ Argument formats:
                   of an 8-bit bus (a short literal pads with 0, so write every bit).
                   A negative decimal (-5) on a logic signal means its two's-complement
                   bit pattern in the declared width (cnt=-1 on 32 bits = 0xffffffff).
-                  A logic signal takes bit/numeric targets, a real signal numeric ones;
+                  The value must fit the signal width (state=99 on 4 bits is an error).
+                  A logic signal takes bit/numeric targets, a real signal decimal/real ones;
                   an event variable has no level -- ask changed(SIG) instead.
                   REPEAT the flag to OR the clauses (OR-of-ANDs): the search holds
                   wherever ANY clause holds, e.g. one clause per channel to find when
@@ -301,32 +306,48 @@ def _parse_timescale_strict(text):
     return n * _UNITS[m.group(2)]
 
 
-class _TimeParseError(ValueError):
+# Exit status, grep-style: 0 = answered (search: found), 1 = search found
+# nothing (_EXIT_NO_MATCH), 2 = error (argparse usage errors use 2 as well),
+# 3 = terminal output cut (_EXIT_OUTPUT_CUT).
+_EXIT_ERROR = 2
+
+
+class _UserError(Exception):
+    """A failure the user can act on: main() prints 'Error: <message>' and
+    exits with _EXIT_ERROR, no traceback. Every user-facing error class
+    derives from it, so main() handles them in one place."""
+
+
+class _TimeParseError(_UserError, ValueError):
     """Raised by parse_time on invalid input; caught in main() for friendly CLI errors."""
 
 
-class _LimitParseError(ValueError):
+class _LimitParseError(_UserError, ValueError):
     """Raised when --limit is invalid (e.g. negative). Separate from
     _TimeParseError so the two validation failures never share a message
     identity; caught in main() for a friendly CLI error."""
 
 
-class _FilterParseError(argparse.ArgumentTypeError):
+class _FilterParseError(_UserError, argparse.ArgumentTypeError):
     """Raised when --filter contains an unsafe or unsupported pattern.
     argparse handles this automatically with a friendly message."""
 
 
-class _ValueParseError(ValueError):
+class _ValueParseError(_UserError, ValueError):
     """Raised when a target value is too large or malformed beyond tolerant matching."""
 
 
-class _ConditionParseError(ValueError):
+class _ConditionParseError(_UserError, ValueError):
     """Raised when search --condition / --show / --changed is invalid."""
 
 
-class _VCDResourceError(RuntimeError):
+class _VCDResourceError(_UserError, RuntimeError):
     """Raised when a VCD input exceeds configured resource limits.
     Surfaced in main() as a CLI error, no Python traceback."""
+
+
+class _VCDFormatError(_UserError):
+    """The input is not a VCD file (no declarations, no $enddefinitions)."""
 
 
 def _check_time_range(ticks, original):
@@ -627,7 +648,8 @@ def _clamp_overwide_logic_value(value, info):
 def _normalize_filter_patterns(value):
     """Normalize and bound user-supplied substring/glob patterns.
 
-    Plain text remains substring matching. Only '*' and '?' trigger glob
+    Plain text is an exact full path or else a substring (see
+    VCDParser.match). Only '*' and '?' trigger glob
     matching; '[' is literal because VCD bus ranges like data[7:0] are
     common signal names. Pattern length and wildcard count are bounded
     to keep Python 3.9's fnmatch/regex translation from becoming a CPU
@@ -821,6 +843,16 @@ def _bus_bytes(bits):
     """A bit-exploded bus value as a mutable MSB-first byte string, from a
     per-bit list indexed by bit number (see _iter_changes)."""
     return bytearray(''.join(reversed(bits)), 'ascii')
+
+
+def _warn_time_regression(prev_t, new_t):
+    """IEEE 1364 requires simulation_time to be non-decreasing. A dump that
+    steps back still parses, but every time-windowed answer (state at T,
+    --begin/--end windows, search spans) assumes order, so say so once
+    instead of answering silently. The index builder refuses such a file."""
+    _warn('timestamps go backwards (#{} after #{}); this VCD is not time-ordered, '
+          'so time-based results may be wrong'.format(new_t, prev_t),
+          cat='time_regression')
 
 
 class VCDParser:
@@ -1049,6 +1081,14 @@ class VCDParser:
                             body.append(tok)
             self._data_offset = f.tell()
 
+        if not done and not raw_vars:
+            # Neither a declaration nor the end of the header in the whole
+            # file: this is not a VCD (or not one this tool can read), and
+            # reporting it as an empty waveform would read as "no data".
+            raise _VCDFormatError(
+                '{} is not a VCD file: no $var declaration or $enddefinitions '
+                'found'.format(self.path))
+
         # Resolved here, surfaced by main() on stderr: a missing or unreadable
         # $timescale silently scaled every reported time by the 1 ps default.
         if ts_valid is None:
@@ -1224,13 +1264,19 @@ class VCDParser:
     def match(self, keywords):
         """Return set of sig_ids matching any pattern, or None for all.
 
-        Plain patterns use case-insensitive substring matching. Patterns
-        containing '*' or '?' use the tool's minimal glob-lite matching:
-        '*' matches any span, '?' matches one character, and all other
-        characters are literal. This intentionally differs from fnmatch:
-        '[' and ']' are NOT character-class delimiters because VCD bus ranges
-        like data[7:0] are common signal names.
+        A plain pattern that equals a signal's full path (case-insensitive,
+        any alias) selects exactly that signal: `top.sig3` must not also
+        pull in top.sig30..top.sig39. Otherwise a plain pattern is a
+        case-insensitive substring. Patterns containing '*' or '?' use the
+        tool's minimal glob-lite matching: '*' matches any span, '?' matches
+        one character, and all other characters are literal. This
+        intentionally differs from fnmatch: '[' and ']' are NOT
+        character-class delimiters because VCD bus ranges like data[7:0] are
+        common signal names. Each pattern is judged on its own, so
+        `--filter top.sig3,ctrl` is the exact signal plus every ctrl match;
+        `top.sig3*` asks for the prefix.
 
+        Shared by --filter, --show and --condition, so the three agree.
         Input is normalized through _normalize_filter_patterns to bound
         pattern length and wildcard count.
         """
@@ -1239,14 +1285,27 @@ class VCDParser:
         raw_pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
         if not raw_pats:
             return None
+        out = set()
+        exact = {pat: set() for pat in raw_pats if '*' not in pat and '?' not in pat}
+        if exact:
+            for sid, info in self.signals.items():
+                for path in info['aliases']:
+                    hits = exact.get(path.lower())
+                    if hits is not None:
+                        hits.add(sid)
+            for hits in exact.values():
+                out.update(hits)
         pats = []
         for pat in raw_pats:
-            if any(ch in pat for ch in '*?'):
+            if pat not in exact:
                 pats.append(('glob', _glob_lite_regex(pat)))
-            else:
+            elif not exact[pat]:
                 pats.append(('substr', pat))
-        out = set()
+        if not pats:
+            return out
         for sid, info in self.signals.items():
+            if sid in out:
+                continue
             for path in info['aliases']:
                 pl = path.lower()
                 hit = False
@@ -1564,7 +1623,7 @@ class VCDParser:
         for time, sid, _prev, val in self._iter_changes(t0, t1, sids):
             yield time, sid, val
 
-    def iter_transitions(self, t0=0, t1=None, sids=None):
+    def iter_transitions(self, t0=0, t1=None, sids=None, baseline=None):
         """Per-signal transition stream: yield (time, sid, prev, value, kind).
 
         Same ordering and no-op/event semantics as iter_events, but each event
@@ -1573,12 +1632,19 @@ class VCDParser:
         'scalar'), so consumers (summary, search) need not track prior state or
         re-derive type themselves. This is the TRANSITIONS view of the change
         stream.
+
+        baseline: optional dict that receives the settled state strictly
+        before t0 (what state_before(t0, sids) returns) before the first
+        record is yielded, or before the stream ends when the window is
+        empty. A windowed query reads its starting state from here instead
+        of replaying the stream from time 0 — the one-pass catch-up on the
+        plain parser, random access on an indexed one.
         """
         sid_kind = self._sid_kind
-        for time, sid, prev, val in self._iter_changes(t0, t1, sids):
+        for time, sid, prev, val in self._iter_changes(t0, t1, sids, baseline):
             yield time, sid, prev, val, sid_kind[sid]
 
-    def _iter_changes(self, t0=0, t1=None, sids=None):
+    def _iter_changes(self, t0=0, t1=None, sids=None, baseline=None):
         """Core change stream: yield (time, sid, prev, value) per value_change.
 
         Single semantic core behind iter_events (drops prev),
@@ -1587,7 +1653,7 @@ class VCDParser:
         trigger counting, bit-exploded bus assembly, the t0 catch-up and
         the sids laziness. See iter_events for the value-change fidelity
         contract; prev is the value seen before this change (None on first
-        observation).
+        observation). See iter_transitions for baseline.
         """
         cur_t = 0
         pending = []       # ordered [(sid, val), ...] — preserves intra-timestamp order
@@ -1679,6 +1745,17 @@ class VCDParser:
         # observation and must not suppress a first all-x record in the window.
         observed_bit_buses = set()
 
+        baseline_out = baseline
+
+        def _cross_into_window():
+            nonlocal baseline_out
+            for gid in observed_bit_buses:
+                last_val[gid] = bit_state[gid].decode('ascii')
+            if baseline_out is not None:
+                # Once: a time-regressing file can cross t0 again later.
+                baseline_out.update(last_val)
+                baseline_out = None
+
         def _next():
             nonlocal toks, ntoks, ti
             if pushback:
@@ -1742,8 +1819,9 @@ class VCDParser:
                         # once per bus here, not per catch-up record — doing it
                         # in the catch-up loop would make the head scan O(width)
                         # per bit change.
-                        for gid in observed_bit_buses:
-                            last_val[gid] = bit_state[gid].decode('ascii')
+                        _cross_into_window()
+                    if new_t < cur_t:
+                        _warn_time_regression(cur_t, new_t)
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -1859,6 +1937,10 @@ class VCDParser:
             if cur_t >= t0:
                 for sid, prev, val in _flush():
                     yield cur_t, sid, prev, val
+            else:
+                # The stream ended before reaching t0: the whole file is
+                # baseline.
+                _cross_into_window()
         finally:
             close = getattr(list_iter, 'close', None)
             if close is not None:
@@ -2038,7 +2120,7 @@ def maybe_auto_build(parser, vcd_path):
 def cmd_index(vcd, args):
     """Every `index` invocation — explicit, --force, --output or the hidden
     --auto — gets the same pointer to the full build."""
-    sys.exit('Error: ' + _FAST_ONLY)
+    raise _UserError(_FAST_ONLY)
 # ================================================================
 # Part 5: Output helpers
 # ================================================================
@@ -2100,9 +2182,10 @@ def _json(obj):
 
 _TERMINAL_BUDGET = 1 << 20
 _EXIT_OUTPUT_CUT = 3
+_EXIT_NO_MATCH = 1
 
 
-class _OutputPathError(Exception):
+class _OutputPathError(_UserError):
     """--output cannot be written (reported as a CLI error, not as an
     unreadable VCD)."""
 
@@ -2170,7 +2253,10 @@ def _is_terminal(stream):
 
 
 def _run_command(command, vcd, args):
-    """Run a query command against the destination its output should go to."""
+    """Run a query command against the destination its output should go to.
+
+    Returns the command's exit status (None = success; search returns
+    _EXIT_NO_MATCH when it found nothing)."""
     target = getattr(args, 'output_file', None)
     if target:
         return _run_to_file(command, vcd, args, target)
@@ -2179,7 +2265,7 @@ def _run_command(command, vcd, args):
         return command(vcd, args)
     sys.stdout = _TerminalBudget(stdout, _TERMINAL_BUDGET)
     try:
-        command(vcd, args)
+        return command(vcd, args)
     except _OutputBudgetExceeded:
         sys.stdout = stdout
         stdout.flush()
@@ -2216,8 +2302,9 @@ def _run_to_file(command, vcd, args, target):
         with os.fdopen(fd, 'w', encoding='utf-8') as sink:
             counted = _CountingSink(sink)
             sys.stdout = counted
+            status = None
             try:
-                command(vcd, args)
+                status = command(vcd, args)
             except SystemExit as stop:
                 if stop.code not in (None, 0):
                     raise
@@ -2241,6 +2328,7 @@ def _run_to_file(command, vcd, args, target):
                          ensure_ascii=False, separators=(',', ':')))
     else:
         print('Wrote {:,} lines ({:,} bytes) to {}'.format(counted.lines, size, target))
+    return status
 
 
 def _limit(args):
@@ -2734,28 +2822,10 @@ def _parse_conditions(text):
 def _resolve_one_signal(vcd, pattern, role):
     """Resolve a condition/trigger pattern to exactly one signal id.
 
-    Matching normally follows VCDParser.match(): substring unless '*' or '?'
-    is present. For condition/trigger positions, however, an exact full path
-    should win over substring matches. Otherwise a precise path like
-    'tb.u.rd_valid' would be rejected merely because 'tb.u.rd_valid0' exists.
+    Matching is VCDParser.match(): an exact full path wins over substring
+    matches, so a precise path like 'tb.u.rd_valid' resolves even though
+    'tb.u.rd_valid0' exists.
     """
-    pat = str(pattern).strip()
-    pl = pat.lower()
-    exact = set()
-    if '*' not in pat and '?' not in pat:
-        for sid, info in vcd.signals.items():
-            for path in info['aliases']:
-                if path.lower() == pl:
-                    exact.add(sid)
-        if len(exact) == 1:
-            return next(iter(exact))
-        if len(exact) > 1:
-            examples = [vcd.signals[s]['path']
-                        for s in sorted(exact, key=lambda sid: vcd.signals[sid]['path'])[:5]]
-            raise _ConditionParseError(
-                '{} pattern {!r} exactly matches {} signals; use list to choose a more specific name, examples: {}'.format(
-                    role, pattern, len(exact), ', '.join(examples)))
-
     sids = vcd.match([pattern])
     if not sids:
         raise _ConditionParseError('{} pattern {!r} matches no signals'.format(role, pattern))
@@ -2801,7 +2871,10 @@ def _check_term_kind(c):
             'use changed({}) to fire on each trigger'.format(
                 c['original'], c['path'], c['path']))
     if kind == 'real':
-        if c['target_int'] is None and c['target_real'] is None:
+        # A binary or hex spelling (b101, 0x10) describes bits, which a real
+        # value does not have; only decimal and real numbers name one.
+        if (c['target_int'] is None and c['target_real'] is None
+                or c['value_text'].lower().startswith(('b', '0b', '0x'))):
             raise _ConditionParseError(
                 'condition {!r} compares real signal {} against a bit pattern; '
                 'write a decimal or real number, e.g. {}=3.14'.format(
@@ -2830,9 +2903,12 @@ def _fit_target_to_width(c):
 
     Over-wide 4-state literal -> leading zeros trimmed. Excess high bits that
     are all '0' or '?' carry no value (b00000001xxxx on an 8-bit bus is
-    0001xxxx; a don't-care bit above the width constrains nothing); a 1/x/z
-    above the width is left in place: no value equals it, and `!=` holds once
-    the cared bits are known (_mask_cared_bits).
+    0001xxxx; a don't-care bit above the width constrains nothing).
+
+    A target the width cannot hold -- a number >= 2**width, or a literal
+    with a 1/x/z above the width -- is rejected, like an out-of-range
+    negative: `state=99` on 4 bits can never be equal and `state!=99` is
+    always true, so either answer would be a plausible-looking non-result.
     """
     if c['kind_of_signal'] == 'real':
         return
@@ -2841,10 +2917,21 @@ def _fit_target_to_width(c):
     if target_int is None:
         raw = c['target_raw']
         excess = len(raw) - width
-        if c['target_real'] is None and excess > 0 and not raw[:excess].strip('0?'):
+        if c['target_real'] is None and excess > 0:
+            if raw[:excess].strip('0?'):
+                raise _ConditionParseError(
+                    'condition {!r}: {} has a 1/x/z above bit {} and cannot match '
+                    'signal {} (width {})'.format(
+                        c['original'], c['value_text'], width - 1, c['path'], width))
             c['target_raw'] = raw[excess:]
         return
     if target_int >= 0:
+        if target_int >> width:
+            raise _ConditionParseError(
+                'condition {!r}: {} does not fit signal {} (width {}); the '
+                'range is 0..{} (or {}..-1 as two\'s complement)'.format(
+                    c['original'], c['value_text'], c['path'], width,
+                    (1 << width) - 1, -(1 << (width - 1))))
         return
     if target_int < -(1 << (width - 1)):
         raise _ConditionParseError(
@@ -2910,11 +2997,10 @@ def _resolve_clauses(vcd, texts):
 def _resolve_show_sids(vcd, show_patterns):
     """Resolve --show patterns to one or more signal ids.
 
-    Show positions are allowed to match multiple signals, but an exact full
-    path still wins over substring matching for that specific pattern. This
-    keeps `--show tb.data` from unexpectedly also selecting `tb.data_out`;
-    users who want broad matching can still write `--show data` or use glob
-    patterns such as `--show "*data*"`.
+    Show positions may match several signals; matching is VCDParser.match(),
+    so an exact full path still selects only that signal (`--show tb.data`
+    does not also pick tb.data_out). Broad matching stays available as
+    `--show data` or a glob such as `--show "*data*"`.
     """
     if not show_patterns:
         return []
@@ -2928,29 +3014,15 @@ def _resolve_show_sids(vcd, show_patterns):
     selected = set()
     missing = []
     for pat in pats:
-        pat_text = str(pat).strip()
-        exact = set()
-        if '*' not in pat_text and '?' not in pat_text:
-            pl = pat_text.lower()
-            for sid, info in vcd.signals.items():
-                for path in info['aliases']:
-                    if path.lower() == pl:
-                        exact.add(sid)
-            if exact:
-                selected.update(exact)
-                continue
-
-        matched = vcd.match([pat_text])
+        matched = vcd.match([pat])
         if matched:
             selected.update(matched)
         else:
-            missing.append(pat_text)
+            missing.append(pat)
 
     if missing:
         raise _ConditionParseError(
             '--show matches no signals: {}'.format(', '.join(missing)))
-    if not selected:
-        raise _ConditionParseError('--show matches no signals')
     return sorted(selected, key=lambda sid: vcd.signals[sid]['path'])
 
 
@@ -3062,11 +3134,14 @@ def _search_end_time(vcd, t0, t1):
     return mx
 
 
-def _event_groups(vcd, t0, t1, sids):
-    """Yield (time, [(sid, val), ...]) groups in time order."""
+def _event_groups(vcd, t0, t1, sids, baseline=None):
+    """Yield (time, [(sid, val), ...]) groups in time order.
+
+    baseline: see VCDParser.iter_transitions.
+    """
     cur_t = None
     group = []
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
+    for t, sid, _prev, val, _kind in vcd.iter_transitions(t0, t1, sids, baseline):
         if cur_t is None:
             cur_t = t
         if t != cur_t:
@@ -3077,7 +3152,7 @@ def _event_groups(vcd, t0, t1, sids):
         yield cur_t, group
 
 
-def _transition_groups(vcd, t0, t1, sids):
+def _transition_groups(vcd, t0, t1, sids, baseline=None):
     """Yield (time, [(sid, prev, val, kind), ...]) groups in time order.
 
     _event_groups over the TRANSITIONS view: same per-timestamp grouping, but
@@ -3087,7 +3162,7 @@ def _transition_groups(vcd, t0, t1, sids):
     """
     cur_t = None
     group = []
-    for t, sid, prev, val, kind in vcd.iter_transitions(t0, t1, sids):
+    for t, sid, prev, val, kind in vcd.iter_transitions(t0, t1, sids, baseline):
         if cur_t is None:
             cur_t = t
         if t != cur_t:
@@ -3154,7 +3229,9 @@ def _summary_rows(vcd, t0, t1, sids):
     # without reloading the module.
     unique_cap = _env_int('VCD_ANALYZER_MAX_UNIQUE_VALUES', 65536)
 
-    # Baseline: {sid: val} — cheap str overwrites, same as state_at.
+    # Baseline: {sid: val}. The stream fills in the state strictly before t0
+    # (a late window neither replays nor decodes the head of the file); when
+    # the window starts at 0 the t=0 records join it in the loop below.
     # Stats dicts are created only once per signal, not on every baseline event.
     baseline = {}
     stats = {}
@@ -3172,7 +3249,7 @@ def _summary_rows(vcd, t0, t1, sids):
             'scalar': is_scalar,
         }
 
-    for t, sid, prev, val, kind in vcd.iter_transitions(0, t1, selected):
+    for t, sid, prev, val, kind in vcd.iter_transitions(t0, t1, selected, baseline):
         is_event = kind == 'event'
         if t <= init_boundary and not (is_event and t >= t0):
             baseline[sid] = val
@@ -3627,6 +3704,7 @@ def cmd_compare(vcd, args):
 
 
 def cmd_search(vcd, args):
+    """Returns _EXIT_NO_MATCH when nothing matched (grep-style status)."""
     ts = vcd.ts_sec
     t0 = parse_time(args.begin, ts) if args.begin else 0
     t1_raw = parse_time(args.end, ts) if args.end else None
@@ -3694,6 +3772,10 @@ def cmd_search(vcd, args):
         # SEVERAL signals to transition together is the exception: coincidence
         # is a property of the tick, not of any one record, so such a clause
         # reports the tick once.
+        # Baseline: settled state strictly before t0. Event mode reports
+        # changes within [t0, t1], so a change landing exactly at t0 is
+        # in-window — unlike interval mode's baseline AT t0 (level
+        # semantics) below; do not unify.
         state = {}
         events = _ResultRows() if limit == 0 else []
         total = 0
@@ -3709,16 +3791,7 @@ def cmd_search(vcd, args):
                 by_edge_sid.setdefault(edge_sids[0], []).append(cl)
 
         stop = False
-        for gt, group in _transition_groups(vcd, 0, t1, selected):
-            if gt < t0:
-                # Baseline: settled state strictly before t0. Event mode reports
-                # changes within [t0, t1], so a change landing exactly at t0 is
-                # in-window — this `< t0` deliberately differs from interval
-                # mode's `<= t0` (level semantics) below; do not unify.
-                for gsid, _gprev, gval, _gkind in group:
-                    state[gsid] = gval
-                continue
-
+        for gt, group in _transition_groups(vcd, t0, t1, selected, baseline=state):
             # A change is an event-var trigger (every record counts) or a real
             # value transition; a first observation (prev is None) is not a
             # change, matching the pre-1.3.20 contract.
@@ -3776,7 +3849,7 @@ def cmd_search(vcd, args):
             obj.update(_trunc_hint(truncated, len(events), total, False, 'events'))
             obj.update(_total_json_fields(total, truncated))
             _json(obj)
-            return
+            return None if events else _EXIT_NO_MATCH
         if events:
             print('Found: {} event(s)'.format(_count_label(len(events), total, truncated)))
             for e in events:
@@ -3786,12 +3859,13 @@ def cmd_search(vcd, args):
         else:
             print('No event in {}..{} where {}.'.format(
                 fmt_time(t0, ts), fmt_time(t1, ts), cond_text))
-        return
+            return _EXIT_NO_MATCH
+        return None
 
     # Interval/segment mode. A segment is an interval further split whenever
     # the displayed show-value tuple changes while the condition remains true.
     has_show = bool(show_sids)
-    # Single-pass: build state up to t0, then process intervals t0+..t1
+    # Single pass over (t0, t1]; the stream supplies the state at t0.
     state = {}
     results = _ResultRows() if limit == 0 else []
     total = 0
@@ -3820,13 +3894,10 @@ def cmd_search(vcd, args):
     # evaluation): _event_groups yields every value_change at one timestamp as a
     # group, which is applied together before the condition is evaluated once on
     # the resulting settled state. Reusing it removes the hand-rolled cur_t/group
-    # regrouping and its duplicate 'final pending group' tail.
-    for gt, ggroup in _event_groups(vcd, 0, t1, selected):
-        if gt <= t0:
-            for gsid, gval in ggroup:
-                state[gsid] = gval
-            continue
-
+    # regrouping and its duplicate 'final pending group' tail. The baseline is
+    # the settled state AT t0 (strictly before t0 + 1), filled in by the stream
+    # itself so a late window neither replays nor decodes the head of the file.
+    for gt, ggroup in _event_groups(vcd, t0 + 1, t1, selected, baseline=state):
         if not init_checks_done:
             active = _any_clause_holds(state, clauses)
             seg_start = t0 if active else None
@@ -3913,7 +3984,7 @@ def cmd_search(vcd, args):
                key: results}
         obj.update(_total_json_fields(total, truncated))
         _json(obj)
-        return
+        return None if results else _EXIT_NO_MATCH
 
     noun = 'segment' if has_show else 'interval'
     if results:
@@ -3929,6 +4000,8 @@ def cmd_search(vcd, args):
     else:
         print('No {} in {}..{} where {}.'.format(
             noun, fmt_time(t0, ts), fmt_time(t1, ts), cond_text))
+        return _EXIT_NO_MATCH
+    return None
 
 # ================================================================
 # Part 9: CLI entry
@@ -3946,7 +4019,8 @@ def _add_time_args(sp):
 def _add_filter(sp):
     sp.add_argument('--filter', metavar='K1,K2,...',
                     type=_normalize_filter_patterns,
-                    help='comma-separated substring/glob patterns, case-insensitive')
+                    help='comma-separated patterns, case-insensitive: an exact full path selects '
+                         'that signal only, other text matches as a substring, * and ? glob')
 
 
 def _add_output(sp):
@@ -4036,71 +4110,71 @@ def main():
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
-        sys.exit(1)
+        sys.exit(_EXIT_ERROR)
+    try:
+        status = _main(args)
+    except FileNotFoundError as e:
+        status = _error('cannot open VCD file: {}'.format(e.filename or args.file))
+    except IsADirectoryError as e:
+        status = _error('not a file: {}'.format(e.filename or args.file))
+    except PermissionError as e:
+        status = _error('permission denied: {}'.format(e.filename or args.file))
+    except BrokenPipeError:
+        raise
+    except (OSError, _UserError) as e:
+        status = _error(str(e))
+    if status:
+        sys.exit(status)
+
+
+def _error(message):
+    try:
+        sys.stderr.write('Error: {}\n'.format(message))
+    except (OSError, ValueError):
+        pass
+    return _EXIT_ERROR
+
+
+def _main(args):
+    """Run the parsed command; returns its exit status (None = 0)."""
     _variant_env_notice()
     block_mib = getattr(args, 'block_mib', None)
     if block_mib is not None and not 1 <= block_mib <= 4096:
-        sys.exit('Error: --block-mib must be between 1 and 4096')
+        raise _UserError('--block-mib must be between 1 and 4096')
+    threads = getattr(args, 'threads', None)
+    if threads is not None and not 1 <= threads <= 16:
+        raise _UserError('--threads must be between 1 and 16')
     if getattr(args, 'changed', None) is not None:
         # Removed in 1.5.0: the flag's event mode was a variant of --condition
         # wearing a flag's clothes, and being a flag it applied to the whole
         # query — an edge could not be scoped to one OR clause, and two signals
         # could not be required to transition together.
-        sys.exit('Error: --changed was removed; write the edge as a condition term instead: '
-                 '--condition "changed({})"'.format(args.changed))
+        raise _UserError('--changed was removed; write the edge as a condition term instead: '
+                         '--condition "changed({})"'.format(args.changed))
 
+    cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
+            'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search}
+    # The index accelerates only the change-stream commands; info,
+    # list and index itself run on the plain parser (no sidecar mmap,
+    # no auto-build judgment on their behalf).
+    stream_cmd = args.cmd in ('dump', 'summary', 'snapshot', 'compare', 'search')
+    vcd = (try_index(args.file) or VCDParser(args.file)) if stream_cmd \
+        else VCDParser(args.file)
+    if stream_cmd:
+        maybe_auto_build(vcd, args.file)
     try:
-        cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
-                'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search,
-                'index': cmd_index}
-        # The index accelerates only the change-stream commands; info,
-        # list and index itself run on the plain parser (no sidecar mmap,
-        # no auto-build judgment on their behalf).
-        stream_cmd = args.cmd in ('dump', 'summary', 'snapshot', 'compare', 'search')
-        vcd = (try_index(args.file) or VCDParser(args.file)) if stream_cmd \
-            else VCDParser(args.file)
-        if stream_cmd:
-            maybe_auto_build(vcd, args.file)
-        try:
-            if vcd.timescale_warning:
-                try:
-                    sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
-                except (OSError, ValueError):
-                    pass
-            if args.cmd == 'index':
-                cmd_index(vcd, args)
-            else:
-                _run_command(cmds[args.cmd], vcd, args)
-        finally:
-            close = getattr(vcd, 'close', None)
-            if close is not None:
-                close()
-    except FileNotFoundError as e:
-        sys.exit('Error: cannot open VCD file: {}'.format(e.filename or args.file))
-    except IsADirectoryError as e:
-        sys.exit('Error: not a file: {}'.format(e.filename or args.file))
-    except PermissionError as e:
-        sys.exit('Error: permission denied: {}'.format(e.filename or args.file))
-    except BrokenPipeError:
-        raise
-    except OSError as e:
-        sys.exit('Error: ' + str(e))
-    except _TimeParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _LimitParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _ValueParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _ConditionParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _VCDResourceError as e:
-        sys.exit('Error: ' + str(e))
-    except _OutputPathError as e:
-        sys.exit('Error: ' + str(e))
-    except _FilterParseError as e:
-        # Reaches here only if raised from VCDParser.match() at runtime;
-        # argparse handles the same error when raised from type=.
-        sys.exit('Error: ' + str(e))
+        if vcd.timescale_warning:
+            try:
+                sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
+            except (OSError, ValueError):
+                pass
+        if args.cmd == 'index':
+            return cmd_index(vcd, args)
+        return _run_command(cmds[args.cmd], vcd, args)
+    finally:
+        close = getattr(vcd, 'close', None)
+        if close is not None:
+            close()
 
 
 if __name__ == '__main__':

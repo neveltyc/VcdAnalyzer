@@ -110,19 +110,30 @@ def test_redundant_leading_zeros_are_trimmed(vcd):
     assert spans(search(vcd, 'bus=b00000001xxxx')) == expected
 
 
-def test_nonzero_bits_above_width_never_match(vcd):
+def test_nonzero_bits_above_width_are_rejected(vcd):
     for target in ('b10000001xxxx', 'bx0001xxxx', 'bz0001xxxx'):
-        assert spans(search(vcd, 'bus=' + target)) == []
+        with pytest.raises(va._ConditionParseError, match='cannot match'):
+            search(vcd, 'bus=' + target)
+
+
+@pytest.mark.parametrize('cond', ['bus=256', 'bus!=256', 'bus=0x100', 'bus=b111111111',
+                                  'bit=2'])
+def test_number_wider_than_the_signal_is_rejected(vcd, cond):
+    with pytest.raises(va._ConditionParseError, match='does not fit'):
+        search(vcd, cond)
+
+
+def test_widest_number_that_fits_is_accepted(vcd):
+    search(vcd, 'bus=255')
+    search(vcd, 'bus=b000000001')
 
 
 def test_over_wide_target_is_fitted_once_at_resolve_time(vcd):
     # The trim happens in _fit_target_to_width, so the matcher sees the
-    # fitted literal; nonzero excess is left for the matcher to reject.
+    # fitted literal.
     v = va.VCDParser(str(vcd))
     (fitted,) = va._resolve_conditions(v, 'bus=b00000001xxxx')
     assert fitted['target_raw'] == '0001xxxx'
-    (kept,) = va._resolve_conditions(v, 'bus=b10000001xxxx')
-    assert kept['target_raw'] == '10000001xxxx'
 
 
 # --- numeric spelling: ASCII digits and the VCD real grammar only -----------

@@ -179,7 +179,7 @@ import hashlib
 import lzma
 import platform as _platform
 
-_NATIVE_ABI_VERSION = 2
+_NATIVE_ABI_VERSION = 3
 _NATIVE_LIBS = {
 __LIBS__
 }
@@ -278,7 +278,8 @@ def _load_native_library():
         return None
 
 
-def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0, max_block_bytes=0):
+def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0, max_block_bytes=0,
+                        threads=0, parallel_min=64 << 20):
     """Build the sidecar natively. None when no usable library (the caller
     falls back to the pure-Python builder); ValueError for fatal build
     errors (non-monotonic timestamps, changed source) so they surface
@@ -291,9 +292,9 @@ def _NATIVE_INDEX_BUILD(path, sidecar, block_bytes, budget_bytes=0, max_block_by
     symbols = raw_symbols(parser)
     start = data_start(path)
     manifest = ('data_start {}\\nblock_bytes {}\\nbudget_bytes {}\\nmax_block_bytes {}\\n'
-                'max_token_len {}\\nsymbols {}\\n{}\\n').format(
+                'max_token_len {}\\nthreads {}\\nparallel_min {}\\nsymbols {}\\n{}\\n').format(
         start, block_bytes, budget_bytes, max_block_bytes, MAX_DATA_TOKEN_LEN,
-        len(symbols), '\\n'.join(symbols)).encode('utf-8')
+        threads, parallel_min, len(symbols), '\\n'.join(symbols)).encode('utf-8')
     err = ctypes.create_string_buffer(512)
     stats_buf = ctypes.create_string_buffer(8192)
     rc = lib.vcdidx_abi_build(manifest, len(manifest), str(path).encode('utf-8'),

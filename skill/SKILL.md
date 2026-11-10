@@ -70,10 +70,12 @@ Invalid: `10.5` (ambiguous — use `10.5ns`), `5 ns` (no space allowed), `1_0`, 
 
 ### Filter pattern format (`--filter`)
 
-Comma-separated. Plain text = case-insensitive substring match. `*` and `?` = glob (but `[` is literal, safe for bus ranges like `data[7:0]`).
+Comma-separated, case-insensitive. A full signal path selects that signal only; other plain text = substring match. `*` and `?` = glob (but `[` is literal, safe for bus ranges like `data[7:0]`).
 
 ```
 --filter clk,rst                       # substring: matches tb.clk, tb.rst_n
+--filter tb.sig3                       # exact path: tb.sig3 only (not tb.sig30)
+--filter 'tb.sig3*'                    # glob: tb.sig3, tb.sig30, tb.sig31, ...
 --filter '*_valid,*_ready'             # glob: matches any signal ending in _valid or _ready
 --filter 'top.u_dma.*'                # glob: all signals under top.u_dma scope
 ```
@@ -333,7 +335,7 @@ Every time value appears in three forms:
 
 ### Filter vs condition signal matching
 
-`--filter` allows multiple matches (substring/glob, returns all hits).
+All three use the same matcher (an exact full path wins). `--filter` allows multiple matches (returns all hits).
 `--condition` signal patterns must resolve to **exactly one** signal. If ambiguous, the error message lists matching candidates — use a more specific path.
 
 ### Bit-exploded bus reassembly
@@ -344,7 +346,7 @@ QuestaSim writes a 32-bit bus as 32 separate 1-bit `$var` declarations with `[N]
 
 ## Error handling
 
-Errors go to stderr and exit with code 1. The error message is a single human-readable line starting with `Error:`. Common errors:
+Errors go to stderr and exit with code 2. The error message is a single human-readable line starting with `Error:`. `search` exits 0 when it found something and 1 when it found nothing (like grep). Common errors:
 
 | Error | Cause | Fix |
 |---|---|---|
@@ -356,6 +358,9 @@ Errors go to stderr and exit with code 1. The error message is a single human-re
 | `--changed was removed` | Pre-1.5.0 flag | Write `--condition "changed(SIG)"` |
 | `end time must be >= begin time` | Reversed time range | Swap begin/end |
 | `cannot open VCD file` | File not found | Check path |
+| `... is not a VCD file` | Input has no `$var` and no `$enddefinitions` | Pass a VCD (convert other formats first) |
+| `... does not fit signal ...` / `... cannot match signal ...` | Target wider than the signal (`state=99` on 4 bits) | Check the width with `list` |
+| `compares real signal ... against a bit pattern` | Binary/hex target on a real signal | Write a decimal or real number |
 | `VCD data section contains no value changes` | Empty or header-only VCD | File may be incomplete |
 
 ---

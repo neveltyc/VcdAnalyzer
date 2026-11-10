@@ -151,9 +151,12 @@ def _diff(raw, idx, path):
             checks += 1
         for begin, end in ((0, None), (times[0], times[len(times) // 2]),
                            (times[len(times) // 2], None)):
-            assert (list(raw.iter_transitions(begin, end, selected))
-                    == list(idx.iter_transitions(begin, end, selected))), \
+            raw_base, idx_base = {}, {}
+            assert (list(raw.iter_transitions(begin, end, selected, raw_base))
+                    == list(idx.iter_transitions(begin, end, selected, idx_base))), \
                 (path.name, 'transitions', begin, end)
+            assert raw_base == idx_base == raw.state_before(begin, selected), \
+                (path.name, 'baseline', begin)
             checks += 1
     return checks
 

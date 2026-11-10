@@ -106,7 +106,8 @@ No pip, no venv, no PyPI. Works anywhere curl and Python 3.8+ are available — 
 | `index` | Build the optional `.vcidx` sidecar that makes point queries instant on huge dumps (full variant) |
 
 All commands accept `--begin` / `--end` time windows with unit suffixes (`fs`, `ps`, `ns`, `us`, `ms`, `s`),
-`--filter` with substring or glob patterns, and `--json` for structured output.
+`--filter` with exact-path, substring or glob patterns, and `--json` for structured output.
+`search` exits 0 when it finds a match and 1 when it finds none; errors exit 2.
 
 Run `python vcd_analyzer.py --help` for the full reference.
 

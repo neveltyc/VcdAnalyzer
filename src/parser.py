@@ -134,6 +134,16 @@ def _bus_bytes(bits):
     return bytearray(''.join(reversed(bits)), 'ascii')
 
 
+def _warn_time_regression(prev_t, new_t):
+    """IEEE 1364 requires simulation_time to be non-decreasing. A dump that
+    steps back still parses, but every time-windowed answer (state at T,
+    --begin/--end windows, search spans) assumes order, so say so once
+    instead of answering silently. The index builder refuses such a file."""
+    _warn('timestamps go backwards (#{} after #{}); this VCD is not time-ordered, '
+          'so time-based results may be wrong'.format(new_t, prev_t),
+          cat='time_regression')
+
+
 class VCDParser:
     """Streaming VCD parser. Token-based: handles single-line and multi-line
     sections, inline simulation keyword blocks, and multi-line port values
@@ -360,6 +370,14 @@ class VCDParser:
                             body.append(tok)
             self._data_offset = f.tell()
 
+        if not done and not raw_vars:
+            # Neither a declaration nor the end of the header in the whole
+            # file: this is not a VCD (or not one this tool can read), and
+            # reporting it as an empty waveform would read as "no data".
+            raise _VCDFormatError(
+                '{} is not a VCD file: no $var declaration or $enddefinitions '
+                'found'.format(self.path))
+
         # Resolved here, surfaced by main() on stderr: a missing or unreadable
         # $timescale silently scaled every reported time by the 1 ps default.
         if ts_valid is None:
@@ -535,13 +553,19 @@ class VCDParser:
     def match(self, keywords):
         """Return set of sig_ids matching any pattern, or None for all.
 
-        Plain patterns use case-insensitive substring matching. Patterns
-        containing '*' or '?' use the tool's minimal glob-lite matching:
-        '*' matches any span, '?' matches one character, and all other
-        characters are literal. This intentionally differs from fnmatch:
-        '[' and ']' are NOT character-class delimiters because VCD bus ranges
-        like data[7:0] are common signal names.
+        A plain pattern that equals a signal's full path (case-insensitive,
+        any alias) selects exactly that signal: `top.sig3` must not also
+        pull in top.sig30..top.sig39. Otherwise a plain pattern is a
+        case-insensitive substring. Patterns containing '*' or '?' use the
+        tool's minimal glob-lite matching: '*' matches any span, '?' matches
+        one character, and all other characters are literal. This
+        intentionally differs from fnmatch: '[' and ']' are NOT
+        character-class delimiters because VCD bus ranges like data[7:0] are
+        common signal names. Each pattern is judged on its own, so
+        `--filter top.sig3,ctrl` is the exact signal plus every ctrl match;
+        `top.sig3*` asks for the prefix.
 
+        Shared by --filter, --show and --condition, so the three agree.
         Input is normalized through _normalize_filter_patterns to bound
         pattern length and wildcard count.
         """
@@ -550,14 +574,27 @@ class VCDParser:
         raw_pats = [k.lower() for k in _normalize_filter_patterns(keywords) or []]
         if not raw_pats:
             return None
+        out = set()
+        exact = {pat: set() for pat in raw_pats if '*' not in pat and '?' not in pat}
+        if exact:
+            for sid, info in self.signals.items():
+                for path in info['aliases']:
+                    hits = exact.get(path.lower())
+                    if hits is not None:
+                        hits.add(sid)
+            for hits in exact.values():
+                out.update(hits)
         pats = []
         for pat in raw_pats:
-            if any(ch in pat for ch in '*?'):
+            if pat not in exact:
                 pats.append(('glob', _glob_lite_regex(pat)))
-            else:
+            elif not exact[pat]:
                 pats.append(('substr', pat))
-        out = set()
+        if not pats:
+            return out
         for sid, info in self.signals.items():
+            if sid in out:
+                continue
             for path in info['aliases']:
                 pl = path.lower()
                 hit = False
@@ -875,7 +912,7 @@ class VCDParser:
         for time, sid, _prev, val in self._iter_changes(t0, t1, sids):
             yield time, sid, val
 
-    def iter_transitions(self, t0=0, t1=None, sids=None):
+    def iter_transitions(self, t0=0, t1=None, sids=None, baseline=None):
         """Per-signal transition stream: yield (time, sid, prev, value, kind).
 
         Same ordering and no-op/event semantics as iter_events, but each event
@@ -884,12 +921,19 @@ class VCDParser:
         'scalar'), so consumers (summary, search) need not track prior state or
         re-derive type themselves. This is the TRANSITIONS view of the change
         stream.
+
+        baseline: optional dict that receives the settled state strictly
+        before t0 (what state_before(t0, sids) returns) before the first
+        record is yielded, or before the stream ends when the window is
+        empty. A windowed query reads its starting state from here instead
+        of replaying the stream from time 0 — the one-pass catch-up on the
+        plain parser, random access on an indexed one.
         """
         sid_kind = self._sid_kind
-        for time, sid, prev, val in self._iter_changes(t0, t1, sids):
+        for time, sid, prev, val in self._iter_changes(t0, t1, sids, baseline):
             yield time, sid, prev, val, sid_kind[sid]
 
-    def _iter_changes(self, t0=0, t1=None, sids=None):
+    def _iter_changes(self, t0=0, t1=None, sids=None, baseline=None):
         """Core change stream: yield (time, sid, prev, value) per value_change.
 
         Single semantic core behind iter_events (drops prev),
@@ -898,7 +942,7 @@ class VCDParser:
         trigger counting, bit-exploded bus assembly, the t0 catch-up and
         the sids laziness. See iter_events for the value-change fidelity
         contract; prev is the value seen before this change (None on first
-        observation).
+        observation). See iter_transitions for baseline.
         """
         cur_t = 0
         pending = []       # ordered [(sid, val), ...] — preserves intra-timestamp order
@@ -990,6 +1034,17 @@ class VCDParser:
         # observation and must not suppress a first all-x record in the window.
         observed_bit_buses = set()
 
+        baseline_out = baseline
+
+        def _cross_into_window():
+            nonlocal baseline_out
+            for gid in observed_bit_buses:
+                last_val[gid] = bit_state[gid].decode('ascii')
+            if baseline_out is not None:
+                # Once: a time-regressing file can cross t0 again later.
+                baseline_out.update(last_val)
+                baseline_out = None
+
         def _next():
             nonlocal toks, ntoks, ti
             if pushback:
@@ -1053,8 +1108,9 @@ class VCDParser:
                         # once per bus here, not per catch-up record — doing it
                         # in the catch-up loop would make the head scan O(width)
                         # per bit change.
-                        for gid in observed_bit_buses:
-                            last_val[gid] = bit_state[gid].decode('ascii')
+                        _cross_into_window()
+                    if new_t < cur_t:
+                        _warn_time_regression(cur_t, new_t)
                     cur_t = new_t
                     if t1 is not None and cur_t > t1:
                         return
@@ -1170,6 +1226,10 @@ class VCDParser:
             if cur_t >= t0:
                 for sid, prev, val in _flush():
                     yield cur_t, sid, prev, val
+            else:
+                # The stream ended before reaching t0: the whole file is
+                # baseline.
+                _cross_into_window()
         finally:
             close = getattr(list_iter, 'close', None)
             if close is not None:

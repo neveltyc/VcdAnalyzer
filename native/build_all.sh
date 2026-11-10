@@ -54,7 +54,8 @@ open(path, 'wb').write(data)
 PY
 # sanity: the ABI entry points must be present in each artifact
 for f in dist/*; do
-  if strings "$f" | grep -q vcdidx_abi_build; then
+  # grep -a, not strings: macOS strings skips the Mach-O symbol table
+  if grep -aq vcdidx_abi_build "$f"; then
     echo "ok  $f ($(wc -c < "$f" | tr -d ' ') bytes)"
   else
     echo "MISSING ABI SYMBOL in $f"; exit 1

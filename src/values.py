@@ -117,7 +117,8 @@ def _clamp_overwide_logic_value(value, info):
 def _normalize_filter_patterns(value):
     """Normalize and bound user-supplied substring/glob patterns.
 
-    Plain text remains substring matching. Only '*' and '?' trigger glob
+    Plain text is an exact full path or else a substring (see
+    VCDParser.match). Only '*' and '?' trigger glob
     matching; '[' is literal because VCD bus ranges like data[7:0] are
     common signal names. Pattern length and wildcard count are bounded
     to keep Python 3.9's fnmatch/regex translation from becoming a CPU

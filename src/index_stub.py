@@ -40,4 +40,4 @@ def maybe_auto_build(parser, vcd_path):
 def cmd_index(vcd, args):
     """Every `index` invocation — explicit, --force, --output or the hidden
     --auto — gets the same pointer to the full build."""
-    sys.exit('Error: ' + _FAST_ONLY)
+    raise _UserError(_FAST_ONLY)

@@ -14,7 +14,8 @@ def _add_time_args(sp):
 def _add_filter(sp):
     sp.add_argument('--filter', metavar='K1,K2,...',
                     type=_normalize_filter_patterns,
-                    help='comma-separated substring/glob patterns, case-insensitive')
+                    help='comma-separated patterns, case-insensitive: an exact full path selects '
+                         'that signal only, other text matches as a substring, * and ? glob')
 
 
 def _add_output(sp):
@@ -104,71 +105,71 @@ def main():
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
-        sys.exit(1)
+        sys.exit(_EXIT_ERROR)
+    try:
+        status = _main(args)
+    except FileNotFoundError as e:
+        status = _error('cannot open VCD file: {}'.format(e.filename or args.file))
+    except IsADirectoryError as e:
+        status = _error('not a file: {}'.format(e.filename or args.file))
+    except PermissionError as e:
+        status = _error('permission denied: {}'.format(e.filename or args.file))
+    except BrokenPipeError:
+        raise
+    except (OSError, _UserError) as e:
+        status = _error(str(e))
+    if status:
+        sys.exit(status)
+
+
+def _error(message):
+    try:
+        sys.stderr.write('Error: {}\n'.format(message))
+    except (OSError, ValueError):
+        pass
+    return _EXIT_ERROR
+
+
+def _main(args):
+    """Run the parsed command; returns its exit status (None = 0)."""
     _variant_env_notice()
     block_mib = getattr(args, 'block_mib', None)
     if block_mib is not None and not 1 <= block_mib <= 4096:
-        sys.exit('Error: --block-mib must be between 1 and 4096')
+        raise _UserError('--block-mib must be between 1 and 4096')
+    threads = getattr(args, 'threads', None)
+    if threads is not None and not 1 <= threads <= 16:
+        raise _UserError('--threads must be between 1 and 16')
     if getattr(args, 'changed', None) is not None:
         # Removed in 1.5.0: the flag's event mode was a variant of --condition
         # wearing a flag's clothes, and being a flag it applied to the whole
         # query — an edge could not be scoped to one OR clause, and two signals
         # could not be required to transition together.
-        sys.exit('Error: --changed was removed; write the edge as a condition term instead: '
-                 '--condition "changed({})"'.format(args.changed))
+        raise _UserError('--changed was removed; write the edge as a condition term instead: '
+                         '--condition "changed({})"'.format(args.changed))
 
+    cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
+            'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search}
+    # The index accelerates only the change-stream commands; info,
+    # list and index itself run on the plain parser (no sidecar mmap,
+    # no auto-build judgment on their behalf).
+    stream_cmd = args.cmd in ('dump', 'summary', 'snapshot', 'compare', 'search')
+    vcd = (try_index(args.file) or VCDParser(args.file)) if stream_cmd \
+        else VCDParser(args.file)
+    if stream_cmd:
+        maybe_auto_build(vcd, args.file)
     try:
-        cmds = {'info': cmd_info, 'list': cmd_list, 'dump': cmd_dump, 'summary': cmd_summary,
-                'snapshot': cmd_snapshot, 'compare': cmd_compare, 'search': cmd_search,
-                'index': cmd_index}
-        # The index accelerates only the change-stream commands; info,
-        # list and index itself run on the plain parser (no sidecar mmap,
-        # no auto-build judgment on their behalf).
-        stream_cmd = args.cmd in ('dump', 'summary', 'snapshot', 'compare', 'search')
-        vcd = (try_index(args.file) or VCDParser(args.file)) if stream_cmd \
-            else VCDParser(args.file)
-        if stream_cmd:
-            maybe_auto_build(vcd, args.file)
-        try:
-            if vcd.timescale_warning:
-                try:
-                    sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
-                except (OSError, ValueError):
-                    pass
-            if args.cmd == 'index':
-                cmd_index(vcd, args)
-            else:
-                _run_command(cmds[args.cmd], vcd, args)
-        finally:
-            close = getattr(vcd, 'close', None)
-            if close is not None:
-                close()
-    except FileNotFoundError as e:
-        sys.exit('Error: cannot open VCD file: {}'.format(e.filename or args.file))
-    except IsADirectoryError as e:
-        sys.exit('Error: not a file: {}'.format(e.filename or args.file))
-    except PermissionError as e:
-        sys.exit('Error: permission denied: {}'.format(e.filename or args.file))
-    except BrokenPipeError:
-        raise
-    except OSError as e:
-        sys.exit('Error: ' + str(e))
-    except _TimeParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _LimitParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _ValueParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _ConditionParseError as e:
-        sys.exit('Error: ' + str(e))
-    except _VCDResourceError as e:
-        sys.exit('Error: ' + str(e))
-    except _OutputPathError as e:
-        sys.exit('Error: ' + str(e))
-    except _FilterParseError as e:
-        # Reaches here only if raised from VCDParser.match() at runtime;
-        # argparse handles the same error when raised from type=.
-        sys.exit('Error: ' + str(e))
+        if vcd.timescale_warning:
+            try:
+                sys.stderr.write('Warning: {}\n'.format(vcd.timescale_warning))
+            except (OSError, ValueError):
+                pass
+        if args.cmd == 'index':
+            return cmd_index(vcd, args)
+        return _run_command(cmds[args.cmd], vcd, args)
+    finally:
+        close = getattr(vcd, 'close', None)
+        if close is not None:
+            close()
 
 
 if __name__ == '__main__':

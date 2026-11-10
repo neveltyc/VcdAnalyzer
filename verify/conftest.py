@@ -34,3 +34,17 @@ def run_cli(args, timeout=20):
 
 def load_json_stdout(text):
     return json.loads(text.strip())
+
+
+@pytest.fixture(autouse=True)
+def _index_decoder_on_every_window(monkeypatch):
+    """In-process tests exercise the index's own decoder on every window.
+
+    IndexedVCD hands wide windows to the plain parser purely for speed
+    (SOURCE_SCAN_RATIO); left on, the differential tests would compare the
+    plain parser with itself there. test_index.py covers the hand-off on
+    its own. CLI subprocess tests keep the production setting.
+    """
+    va = sys.modules.get('vcd_analyzer')
+    if va is not None and hasattr(va, 'IndexedVCD'):
+        monkeypatch.setattr(va.IndexedVCD, 'SOURCE_SCAN_RATIO', float('inf'))

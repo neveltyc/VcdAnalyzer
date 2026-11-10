@@ -408,28 +408,10 @@ def _parse_conditions(text):
 def _resolve_one_signal(vcd, pattern, role):
     """Resolve a condition/trigger pattern to exactly one signal id.
 
-    Matching normally follows VCDParser.match(): substring unless '*' or '?'
-    is present. For condition/trigger positions, however, an exact full path
-    should win over substring matches. Otherwise a precise path like
-    'tb.u.rd_valid' would be rejected merely because 'tb.u.rd_valid0' exists.
+    Matching is VCDParser.match(): an exact full path wins over substring
+    matches, so a precise path like 'tb.u.rd_valid' resolves even though
+    'tb.u.rd_valid0' exists.
     """
-    pat = str(pattern).strip()
-    pl = pat.lower()
-    exact = set()
-    if '*' not in pat and '?' not in pat:
-        for sid, info in vcd.signals.items():
-            for path in info['aliases']:
-                if path.lower() == pl:
-                    exact.add(sid)
-        if len(exact) == 1:
-            return next(iter(exact))
-        if len(exact) > 1:
-            examples = [vcd.signals[s]['path']
-                        for s in sorted(exact, key=lambda sid: vcd.signals[sid]['path'])[:5]]
-            raise _ConditionParseError(
-                '{} pattern {!r} exactly matches {} signals; use list to choose a more specific name, examples: {}'.format(
-                    role, pattern, len(exact), ', '.join(examples)))
-
     sids = vcd.match([pattern])
     if not sids:
         raise _ConditionParseError('{} pattern {!r} matches no signals'.format(role, pattern))
@@ -475,7 +457,10 @@ def _check_term_kind(c):
             'use changed({}) to fire on each trigger'.format(
                 c['original'], c['path'], c['path']))
     if kind == 'real':
-        if c['target_int'] is None and c['target_real'] is None:
+        # A binary or hex spelling (b101, 0x10) describes bits, which a real
+        # value does not have; only decimal and real numbers name one.
+        if (c['target_int'] is None and c['target_real'] is None
+                or c['value_text'].lower().startswith(('b', '0b', '0x'))):
             raise _ConditionParseError(
                 'condition {!r} compares real signal {} against a bit pattern; '
                 'write a decimal or real number, e.g. {}=3.14'.format(
@@ -504,9 +489,12 @@ def _fit_target_to_width(c):
 
     Over-wide 4-state literal -> leading zeros trimmed. Excess high bits that
     are all '0' or '?' carry no value (b00000001xxxx on an 8-bit bus is
-    0001xxxx; a don't-care bit above the width constrains nothing); a 1/x/z
-    above the width is left in place: no value equals it, and `!=` holds once
-    the cared bits are known (_mask_cared_bits).
+    0001xxxx; a don't-care bit above the width constrains nothing).
+
+    A target the width cannot hold -- a number >= 2**width, or a literal
+    with a 1/x/z above the width -- is rejected, like an out-of-range
+    negative: `state=99` on 4 bits can never be equal and `state!=99` is
+    always true, so either answer would be a plausible-looking non-result.
     """
     if c['kind_of_signal'] == 'real':
         return
@@ -515,10 +503,21 @@ def _fit_target_to_width(c):
     if target_int is None:
         raw = c['target_raw']
         excess = len(raw) - width
-        if c['target_real'] is None and excess > 0 and not raw[:excess].strip('0?'):
+        if c['target_real'] is None and excess > 0:
+            if raw[:excess].strip('0?'):
+                raise _ConditionParseError(
+                    'condition {!r}: {} has a 1/x/z above bit {} and cannot match '
+                    'signal {} (width {})'.format(
+                        c['original'], c['value_text'], width - 1, c['path'], width))
             c['target_raw'] = raw[excess:]
         return
     if target_int >= 0:
+        if target_int >> width:
+            raise _ConditionParseError(
+                'condition {!r}: {} does not fit signal {} (width {}); the '
+                'range is 0..{} (or {}..-1 as two\'s complement)'.format(
+                    c['original'], c['value_text'], c['path'], width,
+                    (1 << width) - 1, -(1 << (width - 1))))
         return
     if target_int < -(1 << (width - 1)):
         raise _ConditionParseError(
@@ -584,11 +583,10 @@ def _resolve_clauses(vcd, texts):
 def _resolve_show_sids(vcd, show_patterns):
     """Resolve --show patterns to one or more signal ids.
 
-    Show positions are allowed to match multiple signals, but an exact full
-    path still wins over substring matching for that specific pattern. This
-    keeps `--show tb.data` from unexpectedly also selecting `tb.data_out`;
-    users who want broad matching can still write `--show data` or use glob
-    patterns such as `--show "*data*"`.
+    Show positions may match several signals; matching is VCDParser.match(),
+    so an exact full path still selects only that signal (`--show tb.data`
+    does not also pick tb.data_out). Broad matching stays available as
+    `--show data` or a glob such as `--show "*data*"`.
     """
     if not show_patterns:
         return []
@@ -602,29 +600,15 @@ def _resolve_show_sids(vcd, show_patterns):
     selected = set()
     missing = []
     for pat in pats:
-        pat_text = str(pat).strip()
-        exact = set()
-        if '*' not in pat_text and '?' not in pat_text:
-            pl = pat_text.lower()
-            for sid, info in vcd.signals.items():
-                for path in info['aliases']:
-                    if path.lower() == pl:
-                        exact.add(sid)
-            if exact:
-                selected.update(exact)
-                continue
-
-        matched = vcd.match([pat_text])
+        matched = vcd.match([pat])
         if matched:
             selected.update(matched)
         else:
-            missing.append(pat_text)
+            missing.append(pat)
 
     if missing:
         raise _ConditionParseError(
             '--show matches no signals: {}'.format(', '.join(missing)))
-    if not selected:
-        raise _ConditionParseError('--show matches no signals')
     return sorted(selected, key=lambda sid: vcd.signals[sid]['path'])
 
 
@@ -736,11 +720,14 @@ def _search_end_time(vcd, t0, t1):
     return mx
 
 
-def _event_groups(vcd, t0, t1, sids):
-    """Yield (time, [(sid, val), ...]) groups in time order."""
+def _event_groups(vcd, t0, t1, sids, baseline=None):
+    """Yield (time, [(sid, val), ...]) groups in time order.
+
+    baseline: see VCDParser.iter_transitions.
+    """
     cur_t = None
     group = []
-    for t, sid, val in vcd.iter_events(t0, t1, sids):
+    for t, sid, _prev, val, _kind in vcd.iter_transitions(t0, t1, sids, baseline):
         if cur_t is None:
             cur_t = t
         if t != cur_t:
@@ -751,7 +738,7 @@ def _event_groups(vcd, t0, t1, sids):
         yield cur_t, group
 
 
-def _transition_groups(vcd, t0, t1, sids):
+def _transition_groups(vcd, t0, t1, sids, baseline=None):
     """Yield (time, [(sid, prev, val, kind), ...]) groups in time order.
 
     _event_groups over the TRANSITIONS view: same per-timestamp grouping, but
@@ -761,7 +748,7 @@ def _transition_groups(vcd, t0, t1, sids):
     """
     cur_t = None
     group = []
-    for t, sid, prev, val, kind in vcd.iter_transitions(t0, t1, sids):
+    for t, sid, prev, val, kind in vcd.iter_transitions(t0, t1, sids, baseline):
         if cur_t is None:
             cur_t = t
         if t != cur_t:

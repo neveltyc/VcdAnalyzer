@@ -59,9 +59,10 @@ def _json(obj):
 
 _TERMINAL_BUDGET = 1 << 20
 _EXIT_OUTPUT_CUT = 3
+_EXIT_NO_MATCH = 1
 
 
-class _OutputPathError(Exception):
+class _OutputPathError(_UserError):
     """--output cannot be written (reported as a CLI error, not as an
     unreadable VCD)."""
 
@@ -129,7 +130,10 @@ def _is_terminal(stream):
 
 
 def _run_command(command, vcd, args):
-    """Run a query command against the destination its output should go to."""
+    """Run a query command against the destination its output should go to.
+
+    Returns the command's exit status (None = success; search returns
+    _EXIT_NO_MATCH when it found nothing)."""
     target = getattr(args, 'output_file', None)
     if target:
         return _run_to_file(command, vcd, args, target)
@@ -138,7 +142,7 @@ def _run_command(command, vcd, args):
         return command(vcd, args)
     sys.stdout = _TerminalBudget(stdout, _TERMINAL_BUDGET)
     try:
-        command(vcd, args)
+        return command(vcd, args)
     except _OutputBudgetExceeded:
         sys.stdout = stdout
         stdout.flush()
@@ -175,8 +179,9 @@ def _run_to_file(command, vcd, args, target):
         with os.fdopen(fd, 'w', encoding='utf-8') as sink:
             counted = _CountingSink(sink)
             sys.stdout = counted
+            status = None
             try:
-                command(vcd, args)
+                status = command(vcd, args)
             except SystemExit as stop:
                 if stop.code not in (None, 0):
                     raise
@@ -200,6 +205,7 @@ def _run_to_file(command, vcd, args, target):
                          ensure_ascii=False, separators=(',', ':')))
     else:
         print('Wrote {:,} lines ({:,} bytes) to {}'.format(counted.lines, size, target))
+    return status
 
 
 def _limit(args):

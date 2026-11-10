@@ -24,10 +24,14 @@ Global options:
                On an interactive terminal, stdout output stops after 1 MiB (exit status 3);
                pipes and redirects receive everything.
 
+Exit status: 0 = success (search: found), 1 = search found nothing, 2 = error,
+             3 = terminal output cut.
+
 Argument formats:
   <file>          VCD file path
-  --filter K1,K2  Comma-separated patterns. Plain text uses case-insensitive substring match;
-                  patterns containing * or ? use case-insensitive glob match.
+  --filter K1,K2  Comma-separated, case-insensitive patterns. A full signal path selects
+                  that signal only (top.sig3, not top.sig30); other plain text matches as
+                  a substring; patterns containing * or ? use glob match.
                   e.g. --filter clk,rst   --filter '*_valid,*_ready,*_data'   --filter 'top.u_dma.*'
   --begin T       Start time with optional unit suffix: 0, 100ns, 17.5us, 1ms, 500ps, 200fs
   --end T         End time, same format as --begin. Omit for no upper bound
@@ -41,7 +45,8 @@ Argument formats:
                   of an 8-bit bus (a short literal pads with 0, so write every bit).
                   A negative decimal (-5) on a logic signal means its two's-complement
                   bit pattern in the declared width (cnt=-1 on 32 bits = 0xffffffff).
-                  A logic signal takes bit/numeric targets, a real signal numeric ones;
+                  The value must fit the signal width (state=99 on 4 bits is an error).
+                  A logic signal takes bit/numeric targets, a real signal decimal/real ones;
                   an event variable has no level -- ask changed(SIG) instead.
                   REPEAT the flag to OR the clauses (OR-of-ANDs): the search holds
                   wherever ANY clause holds, e.g. one clause per channel to find when

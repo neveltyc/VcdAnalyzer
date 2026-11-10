@@ -45,9 +45,8 @@ def _single_thread_reference(src, sidecar, monkeypatch, block_mib):
     builder is proven equal to the plain parser by test_index_equivalence;
     a plain-parser reference this deep into a 70 MiB file costs tens of
     seconds per window, so the plain parser checks the first window only.)"""
-    monkeypatch.setenv('VCD_ANALYZER_INDEX_THREADS', '1')
-    stats = va.native_index_build(str(src), str(sidecar), block_mib << 20)
-    monkeypatch.delenv('VCD_ANALYZER_INDEX_THREADS')
+    stats = va.native_index_build(str(src), str(sidecar), block_mib << 20,
+                                  threads=1)
     if stats is None:
         pytest.skip('no native builder on this platform')
     assert stats['threads'] == 1

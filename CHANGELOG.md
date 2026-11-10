@@ -3,6 +3,35 @@
 All notable changes to vcd_analyzer. Detailed per-release
 notes live on the [GitHub Releases](https://github.com/neveltyc/VcdAnalyzer/releases) page.
 
+## Unreleased
+
+### Changed
+
+- `search` and `summary` start at `--begin` instead of replaying from time 0: the change stream hands over the
+  state before the window, so with an index a late window decodes only its own blocks (a 5% window at the end of
+  a 17 MB always-active trace: 2.2 s -> 0.2 s; summary 0.8 s -> 0.25 s), and the plain parser skips emission
+  for the head of the file.
+- Indexed change streams hand off to the plain scan whenever the candidate blocks are at least 25% of the bytes
+  that scan would read (was: only full-file queries with no `--end`, at 80%); the index's decoder costs ~3.7x
+  more per byte, so a full-range `search` was 3.5x slower with an index than without one.
+- `--filter`, `--show` and `--condition` share one matcher: an exact full path selects only that signal, so
+  `--filter top.sig3` no longer also lists `top.sig30`..`top.sig39` (`top.sig3*` does).
+- Exit status is grep-style: `search` exits 1 when it finds nothing; every error exits 2 (was 1, which `search`
+  could not tell apart from a result).
+- The native index builder takes its thread count from the call (manifest) instead of the environment; `index
+  --threads` no longer rewrites `VCD_ANALYZER_INDEX_THREADS`, and `--threads` outside 1..16 is an error.
+  Native ABI 3.
+
+### Fixed
+
+- A condition target the signal cannot hold is an error instead of a confident "No interval": a number wider than
+  the signal (`state=99` on 4 bits, `bit=2`), a literal with a 1/x/z above the width, a binary/hex spelling on a
+  real signal (`temp=b101`).
+- A dump whose timestamps go backwards gets a one-time warning on every query that reads it (the index builder
+  already refused such a file).
+- A file with neither a `$var` declaration nor `$enddefinitions` is reported as "not a VCD file" (exit 2) instead
+  of an empty waveform.
+
 ## [1.6.1](https://github.com/neveltyc/VcdAnalyzer/releases/tag/v1.6.1) - 2026-10-28
 
 ### Added

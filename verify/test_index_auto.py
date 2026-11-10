@@ -124,7 +124,7 @@ def test_background_build_log_only_on_failure(tmp_path, monkeypatch):
     log = Path(va.sidecar_path(src) + '.log')
     monkeypatch.setenv('VCD_ANALYZER_FAIL_INDEX', '1')
     failed = _run_cli(['index', str(src), '--auto'])
-    assert failed.returncode == 1
+    assert failed.returncode == va._EXIT_ERROR
     assert failed.stderr == ''  # detached: diagnostics go to the log
     assert 'simulated index failure' in log.read_text(encoding='utf-8')
     monkeypatch.delenv('VCD_ANALYZER_FAIL_INDEX')

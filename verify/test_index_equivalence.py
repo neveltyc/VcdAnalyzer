@@ -405,3 +405,78 @@ def test_coarsening_stops_at_the_block_cap(tmp_path, builder):
         _diff(raw, idx, path)
     finally:
         idx.close()
+
+
+# --- randomized differential: indexed stream == plain stream -------------------
+
+def _random_dump(rng):
+    """A free-format dump mixing every record kind the change stream handles:
+    scalars, short and full vectors, reals, an event, a bit-exploded bus whose
+    bit 0 is also a standalone alias, $comment bodies with multi-byte UTF-8,
+    $dumpvars/$dumpall wrappers, a malformed '#1.5' and repeated timestamps."""
+    decl = ['$timescale 1ns $end', '$scope module top $end',
+            '$var wire 1 ! a $end', '$var wire 4 " v $end', '$var real 64 # r $end',
+            '$var event 1 $ ev $end', '$var wire 1 % bus [0] $end',
+            '$var wire 1 & bus [1] $end', "$var wire 1 ' bus [2] $end",
+            '$var wire 1 % alias $end', '$var wire 8 ( w $end',
+            '$upscope $end', '$enddefinitions $end']
+    out = [(' ' if rng.random() < .5 else '\n').join(decl)]
+    t = 0
+    for _ in range(rng.randint(5, 120)):
+        if rng.random() < .7:
+            t += rng.choice([0, 1, 1, 2, 5, 10])
+            out.append('#%d' % t)
+        for _ in range(rng.randint(0, 6)):
+            k = rng.random()
+            if k < .2:
+                out.append(rng.choice('01xz') + '!')
+            elif k < .35:
+                out.append('b%s "' % ''.join(rng.choice('01xz') for _ in range(rng.randint(1, 5))))
+            elif k < .45:
+                out.append('r%s #' % rng.choice(['1.5', '-2', '0', '3e-9', 'nan']))
+            elif k < .5:
+                out.append('1$')
+            elif k < .7:
+                out.append(rng.choice('01x') + rng.choice('%&\''))
+            elif k < .78:
+                out.append('b%s (' % bin(rng.randint(0, 255))[2:])
+            elif k < .82:
+                out.append('$comment héllo ü %d $end' % rng.randint(0, 9))
+            elif k < .86:
+                out.append(rng.choice(['$dumpvars', '$dumpall', '$end']))
+            elif k < .9:
+                out.append('#1.5')
+            else:
+                out.append(rng.choice('01') + rng.choice('!%'))
+    return ''.join(rng.choice([' ', '\n', '\t', '  \n']) + unit for unit in out) + '\n'
+
+
+@pytest.mark.parametrize('seed', range(0, 80, 8))
+def test_random_dumps_indexed_stream_matches_plain(tmp_path, seed):
+    """The index feeds the candidate blocks to the plain parser's state machine
+    with a seeded state; any cut, seed or run-boundary mistake shows up here as
+    a different transition list or baseline (removing the run-head '#T' or the
+    seed produced thousands of mismatches over these dumps)."""
+    for case in range(seed, seed + 8):
+        rng = random.Random(case)
+        path = tmp_path / 'r{}.vcd'.format(case)
+        path.write_text(_random_dump(rng), encoding='utf-8')
+        raw = va.VCDParser(str(path))
+        times = sorted({t for t, _s, _v in raw.iter_events()} | {0, 1, 3})
+        selections = [None] + [{s} for s in raw.signals] + [set(list(raw.signals)[:3])]
+        for block_bytes in (1, 23):
+            sidecar = tmp_path / 'r{}-{}.idx'.format(case, block_bytes)
+            va.build_index(path, sidecar, block_bytes)
+            idx = va.IndexedVCD(path, sidecar, enforce_gate=False)
+            try:
+                for selected in selections:
+                    for _ in range(4):
+                        a = rng.choice(times)
+                        b = rng.choice([None, a, a + rng.randint(0, 20)])
+                        raw_base, idx_base = {}, {}
+                        assert (list(raw.iter_transitions(a, b, selected, raw_base))
+                                == list(idx.iter_transitions(a, b, selected, idx_base))), \
+                            (case, block_bytes, selected, a, b)
+                        assert raw_base == idx_base, (case, block_bytes, selected, a)
+            finally:
+                idx.close()

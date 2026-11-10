@@ -12,7 +12,7 @@ Commands:
   compare    <file> --at T1,T2 [--filter K1,K2]    Diff signal values between two time points
   search     <file> --condition C [--condition C ...] [--show K1,K2] [--begin T] [--end T]
                                                         Conditional search and associated signal observation
-  index      <file> [--block-mib N] [--force] [--output PATH]
+  index      <file> [--block-mib N] [--threads N] [--force] [--output PATH]
                                                         Build the optional .vcidx sidecar (full variant)
 
 Global options:
@@ -106,6 +106,7 @@ __version__ = '1.6.1'
 import sys
 import os
 import re
+import codecs
 import math
 import decimal
 import json

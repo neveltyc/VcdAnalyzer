@@ -134,6 +134,48 @@ def _bus_bytes(bits):
     return bytearray(''.join(reversed(bits)), 'ascii')
 
 
+def _token_chunk_size(chunk_size=None):
+    if chunk_size is None:
+        chunk_size = _env_int('VCD_ANALYZER_TOKEN_CHUNK_SIZE', 4 * 1024 * 1024)
+    return max(chunk_size, 65536)
+
+
+def _split_text_chunks(chunks):
+    """Token lists from successive text chunks of the data section.
+
+    A carry buffer holds any partial token spanning a chunk boundary, so the
+    flat token stream is identical to splitting the whole text at once.
+    """
+    carry = ''
+    for chunk in chunks:
+        if carry:
+            chunk = carry + chunk
+            carry = ''
+        # If the chunk does not end on whitespace its final token may be
+        # truncated. Cut at the last whitespace, tokenize the complete
+        # prefix, and carry the remainder. rfind over the six VCD
+        # whitespace chars stays in C (no per-character Python scan).
+        if not chunk[-1].isspace():
+            cut = max(chunk.rfind(' '), chunk.rfind('\n'), chunk.rfind('\t'),
+                      chunk.rfind('\r'), chunk.rfind('\v'), chunk.rfind('\f'))
+            if cut < 0:
+                carry = chunk
+                _check_token_lengths((carry,))
+                continue
+            carry = chunk[cut + 1:]
+            _check_token_lengths((carry,))
+            chunk = chunk[:cut]
+        toks = chunk.split()
+        _check_token_lengths(toks)
+        if toks:
+            yield toks
+    if carry:
+        tail = carry.split()
+        _check_token_lengths(tail)
+        if tail:
+            yield tail
+
+
 def _warn_time_regression(path, prev_t, new_t):
     """IEEE 1364 requires simulation_time to be non-decreasing. A dump that
     steps back still parses, but every time-windowed answer (state at T,
@@ -617,43 +659,10 @@ class VCDParser:
         if self._initial_tokens:
             yield list(self._initial_tokens)
 
-        if chunk_size is None:
-            chunk_size = _env_int('VCD_ANALYZER_TOKEN_CHUNK_SIZE', 4 * 1024 * 1024)
-        if chunk_size < 65536:
-            chunk_size = 65536
-        carry = ''
+        chunk_size = _token_chunk_size(chunk_size)
         with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
             f.seek(self._data_offset)
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                if carry:
-                    chunk = carry + chunk
-                    carry = ''
-                # If the chunk does not end on whitespace its final token may be
-                # truncated. Cut at the last whitespace, tokenize the complete
-                # prefix, and carry the remainder. rfind over the six VCD
-                # whitespace chars stays in C (no per-character Python scan).
-                if not chunk[-1].isspace():
-                    cut = max(chunk.rfind(' '), chunk.rfind('\n'), chunk.rfind('\t'),
-                              chunk.rfind('\r'), chunk.rfind('\v'), chunk.rfind('\f'))
-                    if cut < 0:
-                        carry = chunk
-                        _check_token_lengths((carry,))
-                        continue
-                    carry = chunk[cut + 1:]
-                    _check_token_lengths((carry,))
-                    chunk = chunk[:cut]
-                toks = chunk.split()
-                _check_token_lengths(toks)
-                if toks:
-                    yield toks
-        if carry:
-            tail = carry.split()
-            _check_token_lengths(tail)
-            if tail:
-                yield tail
+            yield from _split_text_chunks(iter(lambda: f.read(chunk_size), ''))
 
     def _is_structural_token(self, tok):
         """Return True when tok is structural rather than an identifier_code.
@@ -926,12 +935,26 @@ class VCDParser:
         """Core change stream: yield (time, sid, prev, value) per value_change.
 
         Single semantic core behind iter_events (drops prev),
-        iter_transitions (adds kind) and the state_* folds. Owns no-op
-        coalescing, cross-timestamp last_val persistence, event-variable
-        trigger counting, bit-exploded bus assembly, the t0 catch-up and
-        the sids laziness. See iter_events for the value-change fidelity
-        contract; prev is the value seen before this change (None on first
-        observation). See iter_transitions for baseline.
+        iter_transitions (adds kind) and the state_* folds: the whole data
+        section through _change_stream. See iter_events for the value-change
+        fidelity contract; prev is the value seen before this change (None
+        on first observation). See iter_transitions for baseline.
+        """
+        return self._change_stream(self._data_token_lists(), t0, t1, sids, baseline)
+
+    def _change_stream(self, token_lists, t0, t1, sids, baseline,
+                       seed_raw=None, seed_state=None):
+        """The change-stream state machine over a token-list source.
+
+        Owns no-op coalescing, cross-timestamp last_val persistence,
+        event-variable trigger counting, bit-exploded bus assembly, the t0
+        catch-up and the sids laziness — the one implementation of the data
+        section grammar for queries. The plain parser feeds it the whole data
+        section; the index feeds it only the candidate blocks, each run
+        preceded by a '#T' token carrying the time in effect at the run's
+        first byte, and seeds the state at t0 - 1 it read by random access:
+        seed_raw maps raw identifier codes to values (bit-exploded bits
+        included), seed_state is the folded per-signal state.
         """
         cur_t = 0
         pending = []       # ordered [(sid, val), ...] — preserves intra-timestamp order
@@ -980,7 +1003,7 @@ class VCDParser:
         # — the per-token generator resume that dominated tokenizer time on
         # large files is gone. Pushback is honored on every read, so the b/r/p
         # look-ahead and $-section skipping keep their exact prior semantics.
-        list_iter = self._data_token_lists()
+        list_iter = token_lists
         pushback = []
         signals = self.signals
         vec_width = self._vec_width
@@ -1022,6 +1045,14 @@ class VCDParser:
         # its bit identifiers occurs. The template's all-x value is not an
         # observation and must not suppress a first all-x record in the window.
         observed_bit_buses = set()
+        if seed_state:
+            last_val.update(seed_state)
+            observed_bit_buses.update(gid for gid in seed_state if gid in bit_state)
+        if seed_raw:
+            for sym0, val0 in seed_raw.items():
+                bit = ord(val0) if len(val0) == 1 and _is_4state_bits(val0) else 120  # 'x'
+                for gid, idx in bit_map.get(sym0, ()):
+                    bit_state[gid][bit_top[gid] - idx] = bit
 
         baseline_out = baseline
 

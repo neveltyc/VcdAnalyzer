@@ -1,8 +1,8 @@
 """Query contracts that must not silently degrade.
 
 * Windowed queries start at the window: the change stream hands over the
-  settled state before t0 (`baseline`), identically on the plain parser,
-  the index decoder and the index's plain-scan hand-off.
+  settled state before t0 (`baseline`), identically on the plain parser
+  and on the index's candidate-block runs.
 * `--filter`, `--show` and `--condition` share one matcher: an exact full
   path selects that signal only.
 * A question the file cannot answer is an error, not "no match": a target
@@ -40,13 +40,12 @@ def _stream(parser, t0, t1, sids):
     return base, rows
 
 
-@pytest.mark.parametrize('ratio', [0.0, float('inf')])  # hand-off / decoder
-def test_index_baseline_matches_plain_on_both_paths(tmp_path, monkeypatch, ratio):
-    src = write_vcd(tmp_path, minimal_vcd(DECLS, DATA * 1, scope='top'))
+@pytest.mark.parametrize('block_bytes', [1, 17, 64, 4096])
+def test_index_baseline_matches_plain(tmp_path, block_bytes):
+    src = write_vcd(tmp_path, minimal_vcd(DECLS, DATA, scope='top'))
     raw = va.VCDParser(str(src))
-    va.build_index(src, tmp_path / 's.idx', 17)
+    va.build_index(src, tmp_path / 's.idx', block_bytes)
     idx = va.IndexedVCD(src, tmp_path / 's.idx', enforce_gate=False)
-    monkeypatch.setattr(va.IndexedVCD, 'SOURCE_SCAN_RATIO', ratio)
     try:
         for sids in (None, {'!'}, {'$', '%'}):
             for t0 in (0, 5, 10, 11, 25, 30, 99):

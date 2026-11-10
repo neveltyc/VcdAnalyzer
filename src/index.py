@@ -637,11 +637,6 @@ class IndexedVCD(VCDParser):
                 i+=1
         return found
     POINT_GROUP_SPAN = 1 << 16
-    # Candidate bytes / plain-scan bytes at or above which a change stream
-    # runs on the plain parser (see _iter_changes). The position-aware
-    # decoder measured ~3.7x the plain scan's cost per byte (17 MB synthetic
-    # trace, an always-active signal: break-even at a ~20-25% window).
-    SOURCE_SCAN_RATIO = 0.25
     @staticmethod
     def _record_in_buffer(buf, rel, sym):
         """Decode the value_change whose opener token starts at buf[rel].
@@ -760,6 +755,17 @@ class IndexedVCD(VCDParser):
     def state_pair(self,ta,tb,sids=None):
         return self.state_at(ta,sids),self.state_at(tb,sids)
     def _iter_changes(self,t0=0,t1=None,sids=None,baseline=None):
+        """The plain parser's change stream over the candidate blocks only.
+
+        No second decoder: the blocks that can hold a selected record are
+        read in contiguous runs and fed to VCDParser._change_stream, each
+        run headed by a '#T' token with the time in effect at its first
+        byte (the block table's start time; blocks start at a grammar-unit
+        boundary), and the state at t0 - 1 is seeded from raw_at(). Skipped
+        blocks carry no selected record, so nothing between two runs can
+        change the stream; bus selections read one contiguous span (see
+        candidate_blocks), so a bus's per-tick commit never straddles a gap.
+        """
         if self._gate_rejects():
             self.counters['gate_rejected']=True
             yield from super()._iter_changes(t0,t1,sids,baseline)
@@ -775,102 +781,44 @@ class IndexedVCD(VCDParser):
             needs_bus=(sids is None
                        or any(s in self._bit_state_template for s in sids))
             candidates=self.candidate_blocks(required,t0,t1,include_range=needs_bus)
+            raw=self.raw_at(t0-1,required)
         except _CorruptSidecarError:
             self.counters['corrupt_fallback']=True
             yield from super()._iter_changes(t0,t1,sids,baseline)
             return
-        # The plain scan reads from the data start through the block holding
-        # t1, whatever t0 is; the position-aware decoder reads only the
-        # candidate blocks but costs several times more per byte. When the
-        # candidates are most of what the plain scan would read anyway (an
-        # always-active signal over a wide window), the plain scan wins.
-        scan_end=(self.file_size if t1 is None else
-                  self.blocks[max(0,bisect.bisect_right(self._block_starts,t1)-1)][1]
-                  if self.blocks else self.file_size)
-        if (sum(self.blocks[b][1]-self.blocks[b][0] for b in candidates)
-                >=self.SOURCE_SCAN_RATIO*(scan_end-self.begin_offset)):
-            self.counters['fallback_to_source']=True
-            self.counters['bytes_is_estimate']=True
-            self.counters['bytes']+=scan_end-self._data_offset
-            yield from super()._iter_changes(t0,t1,sids,baseline)
-            return
-        raw=self.raw_at(t0-1,required)
-        previous=self.fold_raw(raw,sids)
-        if baseline is not None:
-            baseline.update(previous)
-        selected=set(self.signals) if sids is None else sids
-        vec_width=self._vec_width
-        # MSB-first bytearrays, as in VCDParser._iter_changes: one byte store
-        # per bit write, one C-level decode per committed bus value.
-        bit_state={gid:_bus_bytes(bits) for gid,bits in self._bit_state_template.items() if gid in selected}
-        bit_top={gid:len(state)-1 for gid,state in bit_state.items()}
-        for sym,val in raw.items():
-            bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
-            for gid,index in self._bit_map.get(sym,()):
-                if gid in bit_state:bit_state[gid][bit_top[gid]-index]=bit
-        # Bit-exploded buses commit once per timestamp, matching the 1.5.6
-        # parser: bit writes buffer until the tick ends, so cross-bit
-        # intermediates never reach the stream; a second write to the SAME
-        # bit in one tick is a genuine delta step and exposes the assembled
-        # value it replaces first. Main commits at every '#T' token — a
-        # repeated timestamp is two commit points — so each time marker
-        # commits, and the tick boundary is otherwise detected from the
-        # records themselves (a block may start mid-tick with no marker).
-        bus_dirty={}
-        def commit_buses():
-            out=[(gid,bit_state[gid].decode('ascii')) for gid in bus_dirty]
-            bus_dirty.clear()
-            return out
-        def emit(records,t):
-            for sid,value in records:
-                prev=previous.get(sid)
-                if sid not in self._event_sids and prev==value:continue
-                previous[sid]=value
-                yield t,sid,prev,value
-        cur_t=None
-        stopped=False
+        runs=[]
         for bid in candidates:
-            for _pos,_before,kind,t,sym,val in self.block_items(bid):
-                if kind=='time':
-                    yield from emit(commit_buses(),cur_t)
-                    cur_t=t
-                    if t1 is not None and t>t1:stopped=True;break
-                    continue
-                if kind!='value':continue
-                if t!=cur_t:
-                    yield from emit(commit_buses(),cur_t)
-                    cur_t=t
-                if t1 is not None and t>t1:stopped=True;break
-                if t<t0 or sym not in required:continue
-                bit=ord(val) if len(val)==1 and _is_4state_bits(val) else 120  # 'x'
-                records=[]
-                for gid,index in self._bit_map.get(sym,()):
-                    if gid in bit_state:
-                        pos=bit_top[gid]-index
-                        written=bus_dirty.get(gid)
-                        if written is None:
-                            bus_dirty[gid]={index}
-                        elif index in written:
-                            if bit_state[gid][pos]!=bit:
-                                records.append((gid,bit_state[gid].decode('ascii')))
-                            bus_dirty[gid]={index}
-                        else:
-                            written.add(index)
-                        bit_state[gid][pos]=bit
-                if sym in selected and sym in self.signals:
-                    info=self.signals[sym]
-                    n=len(val);w=info['width']
-                    # 1.5.6 canonicalization: pad short 4-state vectors to the
-                    # declared width, clamp over-wide logic values to all-x.
-                    if sym in vec_width and n<w and _is_4state_bits(val):
-                        val=val.rjust(w,_PAD_CHAR[val[0]])
-                    elif n>w:
-                        val=_clamp_overwide_logic_value(val,info)
-                    records.append((sym,val))
-                yield from emit(records,t)
-            if stopped:break
-        if not stopped:
-            yield from emit(commit_buses(),cur_t)
+            if runs and runs[-1][1]==bid:
+                runs[-1][1]=bid+1
+            else:
+                runs.append([bid,bid+1])
+        yield from self._change_stream(self._run_token_lists(runs),t0,t1,sids,baseline,
+                                       raw,self.fold_raw(raw,sids))
+    def _run_token_lists(self, runs):
+        chunk_size=_token_chunk_size()
+        for first,stop in runs:
+            start=self.blocks[first][0]
+            end=self.blocks[stop-1][1]
+            self.counters['blocks']+=stop-first
+            yield ['#{}'.format(self.blocks[first][2])]
+            yield from _split_text_chunks(self._text_chunks(start,end,chunk_size))
+    def _text_chunks(self, start, end, chunk_size):
+        """Decoded text of source bytes [start, end), as the plain parser's
+        text-mode read decodes it (UTF-8, replacement on error)."""
+        decoder=codecs.getincrementaldecoder('utf-8')('replace')
+        while start<end:
+            data=_pread(self.fd,min(chunk_size,end-start),start)
+            if not data:
+                break
+            start+=len(data)
+            self.counters['reads']+=1
+            self.counters['bytes']+=len(data)
+            text=decoder.decode(data)
+            if text:
+                yield text
+        text=decoder.decode(b'',True)
+        if text:
+            yield text
 
 
 
